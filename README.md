@@ -1,30 +1,29 @@
-# 🏥 Hospital Data Retrieval Script
+# 🏥 MedMap
 
-Retrieve hospital details from **Google Maps Places API** for any city and save to CSV/JSON.  
-Optionally clean & structure addresses using **Groq LLM**.
-
----
-
-## Features
-
-- 🔍 Search hospitals via Google Maps Text Search API
-- 📄 Automatic **pagination** (up to 60 results)
-- 🧠 Optional **Groq LLM** address cleaning (`--clean-addresses`)
-- 📊 Output to both **CSV** and **JSON**
-- 🌍 Easily extensible to **any city** via `--city` flag
-- 🛡️ Robust error handling (rate limits, network errors, missing fields)
+**MedMap** is a fast, interactive Streamlit web application that retrieves hospital data from the **Google Maps Places API** for any given city. It allows location-biased searching to discover hundreds of unique hospitals, with easy exports to CSV and JSON formats.
 
 ---
 
-## Setup
+## ✨ Features
+
+- **🔍 Interactive UI**: Beautiful, premium Streamlit interface.
+- **📄 Automatic Pagination**: Fetches up to 60 results per batch seamlessly.
+- **➕ Load More**: Intelligently shifts the search radius iteratively across 16 compass directions to discover hospitals that Google Maps hides behind its 60-result hard limit.
+- **🛡️ Deduplication**: Automatically removes duplicate entries across search rounds.
+- **🌐 Website Retrieval**: Specifically fetches the official website for each hospital via the Place Details API.
+- **📊 Export Options**: Download your current search batch, or download a merged file containing all accumulated searches in both CSV and JSON.
+- **🔒 Secure**: API keys are entered directly into the browser session via the UI and are never saved to disk. Safe for GitHub and public deployment.
+
+---
+
+## 🚀 Setup & Usage (Local)
 
 ### 1. Prerequisites
 
 - Python 3.9+
-- A [Google Maps API key](https://console.cloud.google.com/apis/credentials) with the **Places API** enabled
-- *(Optional)* A [Groq API key](https://console.groq.com/keys) for address cleaning
+- A [Google Maps API key](https://console.cloud.google.com/apis/credentials) with the **Places API** enabled.
 
-### 2. Install dependencies
+### 2. Install Dependencies
 
 ```bash
 # Create and activate a virtual environment (recommended)
@@ -35,106 +34,59 @@ source venv/bin/activate   # Linux/macOS
 pip install -r requirements.txt
 ```
 
-### 3. Configure API keys
+### 3. Run the App
+
+Instead of configuring `.env` files, simply launch the app directly:
 
 ```bash
-cp .env.example .env
+streamlit run app.py
 ```
 
-Edit `.env` and replace the placeholder values with your real keys:
+The application will open in your default web browser (usually at `http://localhost:8501`).
 
-```
-GOOGLE_MAPS_API_KEY=AIzaSy...
-GROQ_API_KEY=gsk_...          # only needed with --clean-addresses
-```
+### 4. How to Use
 
-> **⚠️ Security**: Never commit your `.env` file. Add it to `.gitignore`.
+1. **Enter API Key**: Paste your Google Maps API Key into the sidebar's password field.
+2. **Search**: Enter a city name (e.g., "Hyderabad, India") and click **Search Hospitals**.
+3. **Load More**: To discover hospitals beyond the initial 60, click the **Load More Hospitals** button at the bottom of the table.
+4. **Download**: Use the download buttons to export your data to CSV or JSON.
 
 ---
 
-## Usage
+## 📦 Project Structure
 
-```bash
-# Default — fetch hospitals in Hyderabad, India
-python hospital_scraper.py
-
-# Different city
-python hospital_scraper.py --city "Chennai, India"
-
-# Custom output file name (creates results.csv & results.json)
-python hospital_scraper.py --output results
-
-# Enable Groq address cleaning
-python hospital_scraper.py --clean-addresses
-
-# Dry run — validate config without making API calls
-python hospital_scraper.py --dry-run
-
-# Combine flags
-python hospital_scraper.py --city "Mumbai, India" --clean-addresses --output mumbai_hospitals
-```
-
----
-
-## Output Format
-
-### CSV (`hospitals.csv`)
-
-| hospital_name | city | state | full_address | latitude | longitude | rating | user_ratings_total | place_id |
-|---|---|---|---|---|---|---|---|---|
-| Apollo Hospital | Hyderabad | Telangana | Jubilee Hills, Hyderabad, Telangana 500033, India | 17.43 | 78.41 | 4.2 | 1500 | ChIJ... |
-
-### JSON (`hospitals.json`)
-
-```json
-[
-  {
-    "hospital_name": "Apollo Hospital",
-    "city": "Hyderabad",
-    "state": "Telangana",
-    "full_address": "Jubilee Hills, Hyderabad, Telangana 500033, India",
-    "latitude": "17.43",
-    "longitude": "78.41",
-    "rating": "4.2",
-    "user_ratings_total": "1500",
-    "place_id": "ChIJ..."
-  }
-]
-```
-
----
-
-## Project Structure
-
-```
-hospital/
-├── .env.example          # API key template
-├── .env                  # Your actual keys (git-ignored)
-├── requirements.txt      # Python dependencies
-├── hospital_scraper.py   # Main script
-├── hospitals.csv         # Generated output
-├── hospitals.json        # Generated output
+```text
+medmap/
+├── app.py                # Main Streamlit application
+├── requirements.txt      # Python dependencies (streamlit, requests, pandas)
+├── .env.example          # Reference file (not strictly needed)
+├── .gitignore            # Git exclusions
 └── README.md             # This file
 ```
 
 ---
 
-## Extending to Other Cities
+## 🌍 Export Format
 
-Simply pass a different `--city` value:
+The generated CSV and JSON files will contain the following columns/keys:
 
-```bash
-python hospital_scraper.py --city "Bangalore, India" --output bangalore_hospitals
-python hospital_scraper.py --city "New York, USA"    --output nyc_hospitals
-```
+- `Hospital Name`
+- `City`
+- `State`
+- `Address`
+- `Website URL`
+- `Rating`
+- `Reviews`
 
 ---
 
-## Troubleshooting
+## 🛠️ Deploying to Streamlit Community Cloud
 
-| Issue | Solution |
-|---|---|
-| `GOOGLE_MAPS_API_KEY is not set` | Copy `.env.example` → `.env` and add your key |
-| `REQUEST_DENIED` | Enable the **Places API** in your Google Cloud Console |
-| `OVER_QUERY_LIMIT` | You've hit your daily quota — wait or upgrade your plan |
-| `groq package not installed` | Run `pip install groq` |
+MedMap is designed to be easily hosted on Streamlit Cloud:
+
+1. Push this repository to GitHub.
+2. Go to [share.streamlit.io](https://share.streamlit.io) and connect your GitHub account.
+3. Select your repository and `app.py` as the main file.
+4. Click **Deploy**.
+
+Since API keys are supplied via the UI by the end user at runtime, you do **not** need to configure Streamlit Secrets.
