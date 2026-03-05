@@ -59,8 +59,6 @@ The application will open in your default web browser (usually at `http://localh
 medmap/
 ├── app.py                # Main Streamlit application
 ├── requirements.txt      # Python dependencies (streamlit, requests, pandas)
-├── .env.example          # Reference file (not strictly needed)
-├── .gitignore            # Git exclusions
 └── README.md             # This file
 ```
 
@@ -79,14 +77,5 @@ The generated CSV and JSON files will contain the following columns/keys:
 - `Reviews`
 
 ---
-
-## 🛠️ Deploying to Streamlit Community Cloud
-
-MedMap is designed to be easily hosted on Streamlit Cloud:
-
-1. Push this repository to GitHub.
-2. Go to [share.streamlit.io](https://share.streamlit.io) and connect your GitHub account.
-3. Select your repository and `app.py` as the main file.
-4. Click **Deploy**.
 
 Since API keys are supplied via the UI by the end user at runtime, you do **not** need to configure Streamlit Secrets.
