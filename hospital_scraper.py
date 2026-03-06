@@ -19,7 +19,6 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -35,20 +34,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-PLACES_TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-# Google returns at most 20 results per page, up to 3 pages (60 results).
-MAX_PAGES = 3
-# Google requires a short delay before requesting the next page token.
-PAGE_TOKEN_DELAY_SECONDS = 2
 # Default output file names (without extension).
 DEFAULT_OUTPUT_BASENAME = "hospitals"
 
 
 # ============================================================================
-# 1. Google Maps Places API helpers
+# 1. Google Maps Places API (New) helpers
 # ============================================================================
 
 def search_hospitals(
@@ -57,7 +48,7 @@ def search_hospitals(
     page_token: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """
-    Execute a single Places Text Search request.
+    Execute a single Places API (New) Text Search request.
 
     Args:
         api_key:    Google Maps API key.
@@ -70,34 +61,48 @@ def search_hospitals(
 
     Raises:
         requests.HTTPError: On non-2xx HTTP status codes.
-        ValueError:         When the API returns a non-OK status.
+        ValueError:         When the API returns an error message.
     """
-    params: Dict[str, str] = {
-        "query": query,
-        "key": api_key,
-    }
-    if page_token:
-        params["pagetoken"] = page_token
+    # Using the new Text Search endpoint
+    url = "https://places.googleapis.com/v1/places:searchText"
 
-    logger.info("Sending Places API request (page_token=%s)…", bool(page_token))
-    response = requests.get(PLACES_TEXT_SEARCH_URL, params=params, timeout=30)
-    response.raise_for_status()
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        # Field mask defines which fields to return. The more fields, the higher the cost.
+        "X-Goog-FieldMask": (
+            "places.id,places.displayName,places.formattedAddress,"
+            "places.location,places.rating,places.userRatingCount"
+        ),
+    }
+
+    payload: Dict[str, Any] = {
+        "textQuery": query,
+    }
+
+    if page_token:
+        payload["pageToken"] = page_token
+
+    logger.info("Sending Places API (New) request (page_token=%s)…", bool(page_token))
+    
+    response = requests.post(url, headers=headers, json=payload, timeout=30)
+    
+    # Let requests handle standard HTTP errors
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as exc:
+        try:
+            error_details = response.json()
+            logger.error("API Error details: %s", json.dumps(error_details, indent=2))
+        except json.JSONDecodeError:
+            pass
+        raise exc
 
     data = response.json()
-    status = data.get("status", "UNKNOWN")
-
-    if status == "ZERO_RESULTS":
-        logger.warning("No results returned by the API.")
-        return [], None
-
-    if status not in ("OK",):
-        error_msg = data.get("error_message", "No error message provided.")
-        raise ValueError(
-            f"Places API returned status '{status}': {error_msg}"
-        )
-
-    results = data.get("results", [])
-    next_token = data.get("next_page_token")
+    
+    # Places API (New) returns results in a 'places' array, and sometimes it's simply empty
+    results = data.get("places", [])
+    next_token = data.get("nextPageToken")
 
     logger.info("Received %d results.", len(results))
     return results, next_token
@@ -132,22 +137,18 @@ def fetch_all_hospitals(api_key: str, city: str) -> List[Dict[str, Any]]:
                 logger.info("No more pages available.")
                 break
 
-            # Google needs a short delay before the next page token becomes valid.
-            logger.info(
-                "Waiting %ds for next page token…", PAGE_TOKEN_DELAY_SECONDS
-            )
-            time.sleep(PAGE_TOKEN_DELAY_SECONDS)
+            # The new API doesn't strictly require the same 2s delay as the old one,
+            # but it is good practice to wait slightly when using page tokens.
+            logger.info("Waiting 1s for next page token…")
+            time.sleep(1)
 
         except requests.exceptions.HTTPError as exc:
             logger.error("HTTP error on page %d: %s", page_num, exc)
             if exc.response is not None and exc.response.status_code == 429:
                 logger.error("Rate limit hit. Try again later or check your quota.")
             break
-        except ValueError as exc:
-            logger.error("API error on page %d: %s", page_num, exc)
-            break
-        except requests.exceptions.RequestException as exc:
-            logger.error("Network error on page %d: %s", page_num, exc)
+        except Exception as exc: # Catching broader exceptions from search parsing issues
+            logger.error("Unexpected error on page %d: %s", page_num, exc)
             break
 
     logger.info("Total hospitals fetched: %d", len(all_results))
@@ -179,10 +180,14 @@ def extract_hospital_details(
         Dict with keys: hospital_name, city, state, full_address, latitude,
         longitude, rating, user_ratings_total, place_id.
     """
-    name = place.get("name", "N/A")
-    address = place.get("formatted_address", "N/A")
+    # The new API returns display name as a text dict: {"text": "Apollo Hospital", "languageCode": "en"}
+    name_dict = place.get("displayName", {})
+    name = name_dict.get("text", "N/A") if isinstance(name_dict, dict) else "N/A"
+    
+    # Formatted address mapping
+    address = place.get("formattedAddress", "N/A")
 
-    # Attempt to parse city and state from formatted_address.
+    # Attempt to parse city and state from formattedAddress.
     # Typical format: "..., City, State ZIP, Country"
     city = default_city
     state = default_state
@@ -201,9 +206,9 @@ def extract_hospital_details(
         city = address_parts[-3].strip()
 
     # Geo-coordinates (useful metadata).
-    location = place.get("geometry", {}).get("location", {})
-    lat = location.get("lat", "")
-    lng = location.get("lng", "")
+    location = place.get("location", {})
+    lat = location.get("latitude", "")
+    lng = location.get("longitude", "")
 
     return {
         "hospital_name": name,
@@ -213,8 +218,8 @@ def extract_hospital_details(
         "latitude": str(lat),
         "longitude": str(lng),
         "rating": str(place.get("rating", "")),
-        "user_ratings_total": str(place.get("user_ratings_total", "")),
-        "place_id": place.get("place_id", ""),
+        "user_ratings_total": str(place.get("userRatingCount", "")),
+        "place_id": place.get("id", ""),
     }
 
 
@@ -326,12 +331,6 @@ def clean_all_addresses(hospitals: List[Dict[str, str]]) -> List[Dict[str, str]]
 # 4. Output helpers
 # ============================================================================
 
-def _fallback_output_path(filepath: str) -> str:
-    """Return a timestamped fallback path beside the requested file."""
-    base, ext = os.path.splitext(filepath)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{base}_{timestamp}{ext}"
-
 def save_to_csv(hospitals: List[Dict[str, str]], filepath: str) -> None:
     """Write hospital records to a CSV file."""
     if not hospitals:
@@ -339,25 +338,12 @@ def save_to_csv(hospitals: List[Dict[str, str]], filepath: str) -> None:
         return
 
     fieldnames = list(hospitals[0].keys())
-    target_path = filepath
-    try:
-        with open(target_path, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(hospitals)
-    except PermissionError:
-        target_path = _fallback_output_path(filepath)
-        logger.warning(
-            "Could not write to %s (file may be open/locked). Saving to %s instead.",
-            filepath,
-            target_path,
-        )
-        with open(target_path, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(hospitals)
+    with open(filepath, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(hospitals)
 
-    logger.info("Saved %d records to %s", len(hospitals), target_path)
+    logger.info("Saved %d records to %s", len(hospitals), filepath)
 
 
 def save_to_json(hospitals: List[Dict[str, str]], filepath: str) -> None:
@@ -366,21 +352,10 @@ def save_to_json(hospitals: List[Dict[str, str]], filepath: str) -> None:
         logger.warning("No data to save.")
         return
 
-    target_path = filepath
-    try:
-        with open(target_path, "w", encoding="utf-8") as fh:
-            json.dump(hospitals, fh, indent=2, ensure_ascii=False)
-    except PermissionError:
-        target_path = _fallback_output_path(filepath)
-        logger.warning(
-            "Could not write to %s (file may be open/locked). Saving to %s instead.",
-            filepath,
-            target_path,
-        )
-        with open(target_path, "w", encoding="utf-8") as fh:
-            json.dump(hospitals, fh, indent=2, ensure_ascii=False)
+    with open(filepath, "w", encoding="utf-8") as fh:
+        json.dump(hospitals, fh, indent=2, ensure_ascii=False)
 
-    logger.info("Saved %d records to %s", len(hospitals), target_path)
+    logger.info("Saved %d records to %s", len(hospitals), filepath)
 
 
 # ============================================================================
