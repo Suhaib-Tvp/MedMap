@@ -262,7 +262,14 @@ def _search_hospitals_page(
     try:
         resp.raise_for_status()
     except requests.HTTPError as exc:
-        raise ValueError(f"Places API returned an error: {exc.response.text}")
+        err_msg = exc.response.text
+        try:
+            err_data = exc.response.json()
+            if "error" in err_data and "message" in err_data["error"]:
+                err_msg = err_data["error"]["message"]
+        except Exception:
+            pass
+        raise ValueError(f"Places API returned an error: {err_msg}")
 
     data = resp.json()
     return data.get("places", []), data.get("nextPageToken")
