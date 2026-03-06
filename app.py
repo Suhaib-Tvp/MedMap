@@ -33,10 +33,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 PLACES_TEXT_SEARCH_URL = (
-    "https://maps.googleapis.com/maps/api/place/textsearch/json"
-)
-PLACE_DETAILS_URL = (
-    "https://maps.googleapis.com/maps/api/place/details/json"
+    "https://places.googleapis.com/v1/places:searchText"
 )
 MAX_PAGES = 3
 PAGE_TOKEN_DELAY_SECONDS = 2
@@ -234,26 +231,41 @@ def _search_hospitals_page(
     radius: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """Execute a single Places Text Search request."""
-    params: Dict[str, str] = {"query": query, "key": api_key}
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": (
+            "places.id,places.displayName,places.formattedAddress,"
+            "places.location,places.rating,places.userRatingCount,"
+            "places.websiteUri,"
+            "nextPageToken"
+        ),
+    }
+    payload: Dict[str, Any] = {
+        "textQuery": query,
+    }
     if page_token:
-        params["pagetoken"] = page_token
-    if location:
-        params["location"] = location
-    if radius:
-        params["radius"] = str(radius)
+        payload["pageToken"] = page_token
+    if location and radius:
+        lat_str, lng_str = location.split(",")
+        payload["locationBias"] = {
+            "circle": {
+                "center": {
+                    "latitude": float(lat_str),
+                    "longitude": float(lng_str)
+                },
+                "radius": float(radius)
+            }
+        }
 
-    resp = requests.get(PLACES_TEXT_SEARCH_URL, params=params, timeout=30)
-    resp.raise_for_status()
+    resp = requests.post(PLACES_TEXT_SEARCH_URL, headers=headers, json=payload, timeout=30)
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        raise ValueError(f"Places API returned an error: {exc.response.text}")
+
     data = resp.json()
-    status = data.get("status", "UNKNOWN")
-
-    if status == "ZERO_RESULTS":
-        return [], None
-    if status != "OK":
-        error_msg = data.get("error_message", "No error message provided.")
-        raise ValueError(f"Places API returned '{status}': {error_msg}")
-
-    return data.get("results", []), data.get("next_page_token")
+    return data.get("places", []), data.get("nextPageToken")
 
 
 def fetch_all_hospitals(
@@ -302,41 +314,13 @@ def compute_centroid(hospitals: List[Dict[str, Any]]) -> Tuple[float, float]:
     """Return the average (lat, lng) from a list of raw place results."""
     lats, lngs = [], []
     for p in hospitals:
-        loc = p.get("geometry", {}).get("location", {})
-        if "lat" in loc and "lng" in loc:
-            lats.append(loc["lat"])
-            lngs.append(loc["lng"])
+        loc = p.get("location", {})
+        if "latitude" in loc and "longitude" in loc:
+            lats.append(loc["latitude"])
+            lngs.append(loc["longitude"])
     if not lats:
         return 0.0, 0.0
     return sum(lats) / len(lats), sum(lngs) / len(lngs)
-
-
-# ============================================================================
-# Google Maps Place Details API — website & phone
-# ============================================================================
-
-def get_place_details(api_key: str, place_id: str) -> Dict[str, str]:
-    """
-    Fetch extra details (website, phone) for a single place.
-
-    Returns dict with 'website' and 'formatted_phone_number' keys.
-    """
-    params = {
-        "place_id": place_id,
-        "fields": "website,formatted_phone_number,name,formatted_address",
-        "key": api_key,
-    }
-    try:
-        resp = requests.get(PLACE_DETAILS_URL, params=params, timeout=15)
-        resp.raise_for_status()
-        result = resp.json().get("result", {})
-        return {
-            "website": result.get("website", ""),
-            "formatted_phone_number": result.get("formatted_phone_number", ""),
-        }
-    except Exception as exc:
-        logger.warning("Place Details error for %s: %s", place_id, exc)
-        return {"website": "", "formatted_phone_number": ""}
 
 
 # ============================================================================
@@ -345,15 +329,16 @@ def get_place_details(api_key: str, place_id: str) -> Dict[str, str]:
 
 def extract_hospital_details(
     place: Dict[str, Any],
-    details: Dict[str, str],
     default_city: str = "",
     default_state: str = "",
 ) -> Dict[str, str]:
-    """Parse raw Places result + details into a flat record dict."""
-    name = place.get("name", "N/A")
-    address = place.get("formatted_address", "N/A")
+    """Parse raw Places result into a flat record dict."""
+    name_dict = place.get("displayName", {})
+    name = name_dict.get("text", "N/A") if isinstance(name_dict, dict) else "N/A"
+    
+    address = place.get("formattedAddress", "N/A")
 
-    # Attempt city / state from formatted_address.
+    # Attempt city / state from formattedAddress.
     city = default_city
     state = default_state
     parts = [p.strip() for p in address.split(",")]
@@ -365,17 +350,15 @@ def extract_hospital_details(
             state = state_candidate
         city = parts[-3].strip()
 
-    location = place.get("geometry", {}).get("location", {})
-
     return {
         "Hospital Name": name,
         "City": city,
         "State": state,
         "Address": address,
-        "Website URL": details.get("website", ""),
+        "Website URL": place.get("websiteUri", ""),
         "Rating": str(place.get("rating", "")),
-        "Reviews": str(place.get("user_ratings_total", "")),
-        "place_id": place.get("place_id", ""),
+        "Reviews": str(place.get("userRatingCount", "")),
+        "place_id": place.get("id", ""),
     }
 
 
@@ -472,7 +455,7 @@ def main() -> None:
         # Filter out duplicates
         new_results = [
             r for r in raw_results
-            if r.get("place_id") and r["place_id"] not in st.session_state["seen_ids"]
+            if r.get("id") and r["id"] not in st.session_state["seen_ids"]
         ]
 
         if not new_results:
@@ -484,20 +467,18 @@ def main() -> None:
         default_city = city_parts[0] if city_parts else ""
         default_state = city_parts[1] if len(city_parts) > 1 else ""
 
-        # Fetch Place Details and extract
+        # Extract details
         batch: List[Dict[str, str]] = []
-        details_progress = st.progress(0, text="Fetching website URLs …")
+        details_progress = st.progress(0, text="Extracting hospital details …")
         total = len(new_results)
 
         for i, place in enumerate(new_results, 1):
-            pid = place.get("place_id", "")
-            details = get_place_details(google_key, pid) if pid else {}
             batch.append(
-                extract_hospital_details(place, details, default_city, default_state)
+                extract_hospital_details(place, default_city, default_state)
             )
             details_progress.progress(
                 i / total,
-                text=f"Fetched details for {i} / {total} hospitals",
+                text=f"Processed {i} / {total} hospitals",
             )
 
         details_progress.empty()
