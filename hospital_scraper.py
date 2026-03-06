@@ -19,6 +19,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -325,6 +326,12 @@ def clean_all_addresses(hospitals: List[Dict[str, str]]) -> List[Dict[str, str]]
 # 4. Output helpers
 # ============================================================================
 
+def _fallback_output_path(filepath: str) -> str:
+    """Return a timestamped fallback path beside the requested file."""
+    base, ext = os.path.splitext(filepath)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{base}_{timestamp}{ext}"
+
 def save_to_csv(hospitals: List[Dict[str, str]], filepath: str) -> None:
     """Write hospital records to a CSV file."""
     if not hospitals:
@@ -332,12 +339,25 @@ def save_to_csv(hospitals: List[Dict[str, str]], filepath: str) -> None:
         return
 
     fieldnames = list(hospitals[0].keys())
-    with open(filepath, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(hospitals)
+    target_path = filepath
+    try:
+        with open(target_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(hospitals)
+    except PermissionError:
+        target_path = _fallback_output_path(filepath)
+        logger.warning(
+            "Could not write to %s (file may be open/locked). Saving to %s instead.",
+            filepath,
+            target_path,
+        )
+        with open(target_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(hospitals)
 
-    logger.info("Saved %d records to %s", len(hospitals), filepath)
+    logger.info("Saved %d records to %s", len(hospitals), target_path)
 
 
 def save_to_json(hospitals: List[Dict[str, str]], filepath: str) -> None:
@@ -346,10 +366,21 @@ def save_to_json(hospitals: List[Dict[str, str]], filepath: str) -> None:
         logger.warning("No data to save.")
         return
 
-    with open(filepath, "w", encoding="utf-8") as fh:
-        json.dump(hospitals, fh, indent=2, ensure_ascii=False)
+    target_path = filepath
+    try:
+        with open(target_path, "w", encoding="utf-8") as fh:
+            json.dump(hospitals, fh, indent=2, ensure_ascii=False)
+    except PermissionError:
+        target_path = _fallback_output_path(filepath)
+        logger.warning(
+            "Could not write to %s (file may be open/locked). Saving to %s instead.",
+            filepath,
+            target_path,
+        )
+        with open(target_path, "w", encoding="utf-8") as fh:
+            json.dump(hospitals, fh, indent=2, ensure_ascii=False)
 
-    logger.info("Saved %d records to %s", len(hospitals), filepath)
+    logger.info("Saved %d records to %s", len(hospitals), target_path)
 
 
 # ============================================================================
