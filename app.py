@@ -1,79 +1,42 @@
 #!/usr/bin/env python3
 """
-Hospital Finder — Streamlit App
-================================
-Interactive web interface for retrieving hospital data from Google Maps
-Places API.
-
-Run:
-    streamlit run app.py
+MedMap — Streamlit App
+Interactive web interface for retrieving place data from Google Maps Places API.
 """
 
 import csv
 import io
 import json
 import logging
+import sqlite3
 import time
+import uuid
+import datetime
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import streamlit as st
+import pandas as pd
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging & Constants
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-PLACES_TEXT_SEARCH_URL = (
-    "https://places.googleapis.com/v1/places:searchText"
-)
+PLACES_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+GEOCODING_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 MAX_PAGES = 3
-PAGE_TOKEN_DELAY_SECONDS = 2
-
-# Compass offsets (lat_delta, lng_delta) used by "Load More" to bias
-# the search toward different parts of the city.  ~0.045° ≈ 5 km.
-SEARCH_OFFSETS = [
-    ( 0.045,  0.000),   # N
-    ( 0.045,  0.045),   # NE
-    ( 0.000,  0.045),   # E
-    (-0.045,  0.045),   # SE
-    (-0.045,  0.000),   # S
-    (-0.045, -0.045),   # SW
-    ( 0.000, -0.045),   # W
-    ( 0.045, -0.045),   # NW
-    ( 0.090,  0.000),   # far N
-    ( 0.000,  0.090),   # far E
-    (-0.090,  0.000),   # far S
-    ( 0.000, -0.090),   # far W
-    ( 0.090,  0.090),   # far NE
-    (-0.090, -0.090),   # far SW
-    ( 0.090, -0.090),   # far NW
-    (-0.090,  0.090),   # far SE
-]
-
+PAGE_TOKEN_DELAY_SECONDS = 1.0
+DB_NAME = "medmap_history.db"
+API_LIMIT_MONTHLY = 1000
 
 # ============================================================================
-# Page config — must be first Streamlit call
+# Page config & CSS
 # ============================================================================
-st.set_page_config(
-    page_title="Place Finder",
-    page_icon="📍",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="MedMap Place Finder", page_icon="📍", layout="wide", initial_sidebar_state="expanded")
 
-
-# ============================================================================
-# Custom CSS for a polished, premium look
-# ============================================================================
 st.markdown(
     """
     <style>
@@ -215,157 +178,176 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ============================================================================
+# Database Setup & Helpers
+# ============================================================================
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS search_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    city TEXT,
+                    keyword TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS downloads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    city TEXT,
+                    keyword TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS api_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT UNIQUE,
+                    city TEXT,
+                    keyword TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    conn.commit()
+    conn.close()
 
+def log_api_usage(count=1):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    for _ in range(count):
+        c.execute("INSERT INTO api_usage DEFAULT VALUES")
+    conn.commit()
+    conn.close()
 
+def get_monthly_api_usage():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM api_usage WHERE strftime('%Y-%m', timestamp) = strftime('%Y-%m', 'now')")
+    count = c.fetchone()[0]
+    conn.close()
+    return count
 
+def log_search(city, keyword):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT INTO search_history (city, keyword) VALUES (?, ?)", (city, keyword))
+    conn.commit()
+    conn.close()
+
+def get_recent_searches(limit=10):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT city, keyword, timestamp FROM search_history ORDER BY timestamp DESC LIMIT ?", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def log_download(city, keyword):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT INTO downloads (city, keyword) VALUES (?, ?)", (city, keyword))
+    conn.commit()
+    conn.close()
+
+def get_recent_downloads(limit=5):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT city, keyword, timestamp FROM downloads ORDER BY timestamp DESC LIMIT ?", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def update_user_session(session_id, city="", keyword=""):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''INSERT INTO user_sessions (session_id, city, keyword, timestamp) 
+                 VALUES (?, ?, ?, CURRENT_TIMESTAMP) 
+                 ON CONFLICT(session_id) 
+                 DO UPDATE SET city=excluded.city, keyword=excluded.keyword, timestamp=CURRENT_TIMESTAMP''', 
+              (session_id, city, keyword))
+    conn.commit()
+    conn.close()
+
+def get_active_users_count():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(DISTINCT session_id) FROM user_sessions WHERE timestamp >= datetime('now', '-1 day')")
+    count = c.fetchone()[0]
+    conn.close()
+    return count
 
 # ============================================================================
-# Google Maps Places API — Text Search
+# API Search & Processing Functions
 # ============================================================================
+@st.cache_data(show_spinner=False, ttl=86400)
+def geocode_city(_api_key: str, city: str) -> Tuple[Optional[float], Optional[float]]:
+    params = {"address": city, "key": _api_key}
+    resp = requests.get(GEOCODING_URL, params=params, timeout=10)
+    log_api_usage(1)
+    if resp.status_code == 200:
+        data = resp.json()
+        if data.get("status") == "OK" and data.get("results"):
+            loc = data["results"][0]["geometry"]["location"]
+            return loc["lat"], loc["lng"]
+    return None, None
 
-def _search_places_page(
-    api_key: str,
-    query: str,
-    page_token: Optional[str] = None,
-    location: Optional[str] = None,
-    radius: Optional[int] = None,
-) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """Execute a single Places Text Search request."""
+def generate_grid(center_lat: float, center_lng: float) -> List[Tuple[float, float]]:
+    # 3x3 grid around city. Spacing ~0.025 deg (approx 2.5km apart)
+    offset = 0.025
+    grid = []
+    for dlat in [-offset, 0, offset]:
+        for dlng in [-offset, 0, offset]:
+            grid.append((center_lat + dlat, center_lng + dlng))
+    return grid
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def perform_grid_search(_api_key: str, category: str, grid: List[Tuple[float, float]], radius: float = 2500.0) -> List[Dict[str, Any]]:
+    all_raw = []
     headers = {
         "Content-Type": "application/json",
-        "X-Goog-Api-Key": api_key,
+        "X-Goog-Api-Key": _api_key,
         "X-Goog-FieldMask": (
             "places.id,places.displayName,places.formattedAddress,"
-            "places.location,places.rating,places.userRatingCount,"
-            "places.websiteUri,places.nationalPhoneNumber,"
+            "places.rating,places.userRatingCount,places.websiteUri,"
+            "places.nationalPhoneNumber,places.internationalPhoneNumber,"
             "nextPageToken"
         ),
     }
-    payload: Dict[str, Any] = {
-        "textQuery": query,
-    }
-    if page_token:
-        payload["pageToken"] = page_token
-    if location and radius:
-        lat_str, lng_str = location.split(",")
-        payload["locationBias"] = {
-            "circle": {
-                "center": {
-                    "latitude": float(lat_str),
-                    "longitude": float(lng_str)
-                },
-                "radius": float(radius)
+
+    for lat, lng in grid:
+        page_token = None
+        for _ in range(MAX_PAGES):
+            payload = {"textQuery": category}
+            if page_token:
+                payload["pageToken"] = page_token
+            payload["locationBias"] = {
+                "circle": {
+                    "center": {"latitude": lat, "longitude": lng},
+                    "radius": radius
+                }
             }
-        }
-
-    resp = requests.post(PLACES_TEXT_SEARCH_URL, headers=headers, json=payload, timeout=30)
-    try:
-        resp.raise_for_status()
-    except requests.HTTPError as exc:
-        err_msg = exc.response.text
-        try:
-            err_data = exc.response.json()
-            if "error" in err_data and "message" in err_data["error"]:
-                err_msg = err_data["error"]["message"]
-        except Exception:
-            pass
-        raise ValueError(f"Places API returned an error: {err_msg}")
-
-    data = resp.json()
-    return data.get("places", []), data.get("nextPageToken")
-
-
-def fetch_all_places(
-    api_key: str,
-    search_category: str,
-    city: str,
-    location: Optional[str] = None,
-    radius: Optional[int] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Fetch all results for a category + city with automatic pagination.
-    Optionally heavily restricted toward a specific location + radius.
-    """
-    if location:
-        query = search_category
-    else:
-        query = f"{search_category} in {city}"
-        
-    all_results: List[Dict[str, Any]] = []
-    page_token: Optional[str] = None
-
-    progress_bar = st.progress(0, text="Fetching page 1 …")
-
-    for page_num in range(1, MAX_PAGES + 1):
-        try:
-            results, page_token = _search_places_page(
-                api_key, query, page_token, location, radius
-            )
-            all_results.extend(results)
-            progress_bar.progress(
-                page_num / MAX_PAGES,
-                text=f"Fetched page {page_num} — {len(all_results)} results so far",
-            )
-
-            if not page_token:
+            resp = requests.post(PLACES_TEXT_SEARCH_URL, headers=headers, json=payload, timeout=30)
+            log_api_usage(1)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("places", [])
+                all_raw.extend(results)
+                page_token = data.get("nextPageToken")
+                if not page_token:
+                    break
+                time.sleep(PAGE_TOKEN_DELAY_SECONDS)
+            else:
                 break
+    return all_raw
 
-            # Google requires a short delay before the next token is valid.
-            time.sleep(PAGE_TOKEN_DELAY_SECONDS)
-
-        except (requests.HTTPError, ValueError, requests.RequestException) as exc:
-            logger.error("Error on page %d: %s", page_num, exc)
-            st.warning(f"⚠️ Error fetching page {page_num}: {exc}")
-            break
-
-    progress_bar.empty()
-    return all_results
-
-
-def compute_centroid(hospitals: List[Dict[str, Any]]) -> Tuple[float, float]:
-    """Return the average (lat, lng) from a list of raw place results."""
-    lats, lngs = [], []
-    for p in hospitals:
-        loc = p.get("location", {})
-        if "latitude" in loc and "longitude" in loc:
-            lats.append(loc["latitude"])
-            lngs.append(loc["longitude"])
-    if not lats:
-        return 0.0, 0.0
-    return sum(lats) / len(lats), sum(lngs) / len(lngs)
-
-
-# ============================================================================
-# Data extraction
-# ============================================================================
-
-def extract_place_details(
-    place: Dict[str, Any],
-    default_city: str = "",
-    default_state: str = "",
-) -> Dict[str, str]:
-    """Parse raw Places result into a flat record dict."""
+def extract_place_details(place: Dict[str, Any], default_city: str = "") -> Dict[str, str]:
     name_dict = place.get("displayName", {})
     name = name_dict.get("text", "N/A") if isinstance(name_dict, dict) else "N/A"
-    
     address = place.get("formattedAddress", "N/A")
-
-    # Attempt city / state from formattedAddress.
+    
     city = default_city
-    state = default_state
     parts = [p.strip() for p in address.split(",")]
     if len(parts) >= 3:
-        state_candidate = "".join(
-            ch for ch in parts[-2] if not ch.isdigit()
-        ).strip()
-        if state_candidate:
-            state = state_candidate
         city = parts[-3].strip()
 
     return {
         "Name": name,
         "City": city,
-        "State": state,
         "Address": address,
         "Phone": place.get("nationalPhoneNumber", place.get("internationalPhoneNumber", "")),
         "Website URL": place.get("websiteUri", ""),
@@ -374,221 +356,190 @@ def extract_place_details(
         "place_id": place.get("id", ""),
     }
 
-
-
-# ============================================================================
-# Conversion helpers for downloads
-# ============================================================================
-
-def to_csv_bytes(hospitals: List[Dict[str, str]]) -> bytes:
-    """Convert hospital list to CSV bytes for download."""
-    if not hospitals:
+def to_csv_bytes(records: List[Dict[str, str]]) -> bytes:
+    if not records:
         return b""
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=hospitals[0].keys())
+    writer = csv.DictWriter(buf, fieldnames=records[0].keys())
     writer.writeheader()
-    writer.writerows(hospitals)
+    writer.writerows(records)
     return buf.getvalue().encode("utf-8")
 
+def to_json_bytes(records: List[Dict[str, str]]) -> bytes:
+    return json.dumps(records, indent=2, ensure_ascii=False).encode("utf-8")
 
-def to_json_bytes(hospitals: List[Dict[str, str]]) -> bytes:
-    """Convert hospital list to pretty JSON bytes for download."""
-    return json.dumps(hospitals, indent=2, ensure_ascii=False).encode("utf-8")
-
+def log_download_callback(city, keyword):
+    log_download(city, keyword)
 
 # ============================================================================
 # Main UI
 # ============================================================================
-
 def main() -> None:
-    # ---- Initialise session state ----
-    if "all_hospitals" not in st.session_state:
-        st.session_state["all_hospitals"] = []        # accumulated across all rounds
-    if "current_hospitals" not in st.session_state:
-        st.session_state["current_hospitals"] = []    # latest batch only
-    if "seen_ids" not in st.session_state:
-        st.session_state["seen_ids"] = set()          # place_ids already stored
-    if "search_round" not in st.session_state:
-        st.session_state["search_round"] = 0          # 0 = first search
-    if "city_center" not in st.session_state:
-        st.session_state["city_center"] = (0.0, 0.0)
-    if "raw_cache" not in st.session_state:
-        st.session_state["raw_cache"] = []             # raw results for centroid
+    init_db()
 
-    # ---- Hero header ----
-    st.markdown('<h1 class="hero-title">📍 Place Finder</h1>', unsafe_allow_html=True)
-    st.markdown(
-        '<p class="hero-sub">Discover places in any city — powered by Google Maps</p>',
-        unsafe_allow_html=True,
-    )
+    if "session_id" not in st.session_state:
+        st.session_state["session_id"] = str(uuid.uuid4())
+        update_user_session(st.session_state["session_id"])
 
-    # ---- Sidebar ----
+    st.markdown('<h1 class="hero-title">📍 MedMap</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="hero-sub">Discover places in any city — powered by Google Maps</p>', unsafe_allow_html=True)
+
     with st.sidebar:
-        st.markdown("## 🔑 API Key")
-        st.markdown("---")
-
-        google_key = st.text_input(
-            "Google Maps API Key",
-            type="password",
-            help="Get yours at https://console.cloud.google.com/apis/credentials",
-        )
-
-        st.markdown("---")
         st.markdown("## ⚙️ Search Settings")
-
-        category = st.text_input(
-            "🏷️ Search Category",
-            value="Hospitals",
-            placeholder="e.g. Restaurants, Pharmacies ...",
-        )
-
-        city = st.text_input(
-            "🌍 City Name",
-            value="Hyderabad, India",
-            placeholder="e.g. Chennai, India",
-        )
-
-        st.markdown("---")
+        
+        # Check Streamlit secrets or OS environment for the key first
+        secure_key = ""
+        try:
+            secure_key = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
+        except Exception:
+            pass
+            
+        if not secure_key:
+            secure_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+            
+        if secure_key:
+            google_key = secure_key
+            st.success("✅ Secure API Key Loaded")
+        else:
+            google_key = st.text_input("🔑 API Key", type="password", help="Get yours at Google Cloud Console")
+        
+        category = st.text_input("🏷️ Search keyword", value="hospital", placeholder="hospital")
+        city = st.text_input("🌍 City Name", value="Hyderabad, India", placeholder="e.g. New Delhi, India")
         search_clicked = st.button("🔍  Search", use_container_width=True)
 
         st.markdown("---")
-        st.markdown(
-            "<div style='color:#55556e;font-size:0.75rem;text-align:center;'>"
-            "Data via Google Maps Places API</div>",
-            unsafe_allow_html=True,
-        )
+        
+        # 11, 12. API Usage Dashboard & Alerts
+        st.markdown("## 📊 Google API Usage")
+        monthly_usage = get_monthly_api_usage()
+        remaining = max(0, API_LIMIT_MONTHLY - monthly_usage)
+        usage_pct = (monthly_usage / API_LIMIT_MONTHLY) * 100
 
-    # ------------------------------------------------------------------
-    # Helper: run one search round, deduplicate, and append to state
-    # ------------------------------------------------------------------
-    def _run_search_round(
-        google_key: str,
-        search_category: str,
-        city: str,
-        location: Optional[str] = None,
-        radius: Optional[int] = None,
-    ) -> None:
-        """Fetch a batch, deduplicate, enrich, and store in session state."""
-        with st.spinner("Searching Google Maps …"):
-            raw_results = fetch_all_places(google_key, search_category, city, location, radius)
+        st.metric("Monthly Requests", f"{monthly_usage} / {API_LIMIT_MONTHLY}")
+        st.metric("Remaining Requests", remaining)
+        st.progress(min(usage_pct / 100, 1.0))
 
-        # Filter out duplicates explicitly
-        new_results = [
-            r for r in raw_results
-            if r.get("id") and r["id"] not in st.session_state["seen_ids"]
-        ]
+        usage_error = False
+        if usage_pct >= 100:
+            st.error("🚨 Monthly API limit reached. Stop API calls.")
+            usage_error = True
+        elif usage_pct >= 90:
+            st.error("🚨 Danger: API usage > 90%!")
+        elif usage_pct >= 70:
+            st.warning("⚠ API usage getting high this month.")
+            
+        st.markdown("---")
+        
+        # 7. Search History
+        st.markdown("## 🕒 Search History")
+        recent_searches = get_recent_searches()
+        if recent_searches:
+            for s_city, s_cat, s_time in recent_searches:
+                st.caption(f"{s_cat} in {s_city} ({s_time[:16]})")
+        else:
+            st.caption("No recent searches.")
+            
+        st.markdown("---")
+        
+        # 8. Downloaded Datasets
+        st.markdown("## 📥 Downloaded Datasets")
+        recent_dl = get_recent_downloads()
+        if recent_dl:
+            for d_city, d_cat, d_time in recent_dl:
+                st.caption(f"{d_city}_{d_cat} ({d_time[:16]})")
+        else:
+            st.caption("No recent downloads.")
+            
+        st.markdown("---")
 
-        if not new_results:
-            st.warning("😕 No new results found. You may have exhausted the area.")
+        # 13. Session Activity
+        st.markdown("## 👥 Session Activity")
+        active_users = get_active_users_count()
+        st.metric("Active Users (Last 24h)", active_users)
+
+        st.markdown("<div style='color:#55556e;font-size:0.75rem;text-align:center;margin-top:20px'>Data via Google Maps Places API</div>", unsafe_allow_html=True)
+
+    if search_clicked:
+        if usage_error:
+            st.error("Cannot perform search: API limit reached. Please check back next month.")
+            return
+        if not google_key:
+            st.error("🔑 **Google Maps API Key** is missing. Paste your key in the sidebar.")
             return
 
-        # Parse city defaults
-        city_parts = [p.strip() for p in city.split(",")]
-        default_city = city_parts[0] if city_parts else ""
-        default_state = city_parts[1] if len(city_parts) > 1 else ""
-        target_city_lower = default_city.lower()
+        update_user_session(st.session_state["session_id"], city, category)
+        log_search(city, category)
 
-        # Extract details and strictly filter by city
-        batch: List[Dict[str, str]] = []
-        details_progress = st.progress(0, text="Extracting and filtering details …")
-        total = len(new_results)
-
-        for i, place in enumerate(new_results, 1):
-            details = extract_place_details(place, default_city, default_state)
+        with st.spinner("Finding city coordinates..."):
+            lat, lng = geocode_city(google_key, city)
             
-            # Strict city filter: ensure the searched city is in the full address or parsed city
+        if lat is None:
+            st.error(f"Could not find coordinates for city: {city}. Check spelling or API Key permissions.")
+            return
+
+        grid = generate_grid(lat, lng)
+
+        with st.spinner("Executing 3x3 Grid Search (fetching 9 regions)..."):
+            raw_results = perform_grid_search(google_key, category, grid)
+
+        # Deduplication
+        seen = set()
+        unique_places = []
+        for r in raw_results:
+            pid = r.get("id")
+            if pid and pid not in seen:
+                seen.add(pid)
+                unique_places.append(r)
+
+        if not unique_places:
+            st.warning("😕 No results found. You may have exhausted the area.")
+            return
+
+        # Filtering strictly to searched city
+        target_city_lower = city.split(",")[0].strip().lower()
+        batch = []
+        for place in unique_places:
+            details = extract_place_details(place, default_city=target_city_lower)
             addr_lower = details["Address"].lower()
             city_lower = details["City"].lower()
+            
             if target_city_lower in addr_lower or target_city_lower == city_lower:
                 batch.append(details)
                 
-            details_progress.progress(
-                i / total,
-                text=f"Processed {i} / {total} results",
-            )
-
-        details_progress.empty()
-
         if not batch:
-            st.warning("😕 No results strictly matched the searched city. You may have exhausted its boundaries.")
+            st.warning("😕 No results strictly matched the searched city.")
             return
-
-        # Update session state
-        for h in batch:
-            st.session_state["seen_ids"].add(h["place_id"])
-        st.session_state["current_hospitals"] = batch
-        st.session_state["all_hospitals"].extend(batch)
-
-        # Store raw results for centroid calculation
-        st.session_state["raw_cache"].extend(new_results)
-        st.session_state["city_center"] = compute_centroid(
-            st.session_state["raw_cache"]
-        )
-
-    # ------------------------------------------------------------------
-    # "Search Hospitals" button action — fresh search, resets state
-    # ------------------------------------------------------------------
-    if search_clicked:
-        if not google_key:
-            st.error(
-                "🔑 **Google Maps API Key** is missing.  \n"
-                "Paste your key in the sidebar to get started."
-            )
-            return
-
-        # Reset state for a new fresh search
-        st.session_state["all_hospitals"] = []
-        st.session_state["current_hospitals"] = []
-        st.session_state["seen_ids"] = set()
-        st.session_state["search_round"] = 0
-        st.session_state["city_center"] = (0.0, 0.0)
-        st.session_state["raw_cache"] = []
+            
+        st.session_state["results"] = batch
         st.session_state["city"] = city
         st.session_state["category"] = category
 
-        _run_search_round(google_key, category, city)
-        st.session_state["search_round"] = 1
-
-    # ------------------------------------------------------------------
-    # Display results
-    # ------------------------------------------------------------------
-    all_hospitals = st.session_state.get("all_hospitals", [])
-    current_hospitals = st.session_state.get("current_hospitals", [])
-    searched_city = st.session_state.get("city", "")
-    searched_category = st.session_state.get("category", "")
-
-    if all_hospitals:
+    results = st.session_state.get("results", [])
+    if results:
         st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-
-        # Metrics row (for ALL accumulated hospitals)
+        
+        # Calculate stats
         avg_rating = 0
         rated_count = 0
         total_reviews = 0
-        with_website = sum(1 for h in all_hospitals if h.get("Website URL"))
-        for h in all_hospitals:
+        for h in results:
             try:
-                r = float(h["Rating"])
-                avg_rating += r
+                avg_rating += float(h["Rating"])
                 rated_count += 1
-            except (ValueError, KeyError):
+            except ValueError:
                 pass
             try:
                 total_reviews += int(h["Reviews"])
-            except (ValueError, KeyError):
+            except ValueError:
                 pass
         avg_rating = round(avg_rating / rated_count, 1) if rated_count else 0
-        rounds = st.session_state.get("search_round", 1)
-
+        
         st.markdown(
             f"""
             <div class="metric-row">
                 <div class="metric-card">
-                    <div class="value">{len(all_hospitals)}</div>
-                    <div class="label">Total Results</div>
-                </div>
-                <div class="metric-card">
-                    <div class="value">{len(current_hospitals)}</div>
-                    <div class="label">Latest Batch</div>
+                    <div class="value">{len(results)}</div>
+                    <div class="label">Total Unique Results</div>
                 </div>
                 <div class="metric-card">
                     <div class="value">⭐ {avg_rating}</div>
@@ -598,118 +549,50 @@ def main() -> None:
                     <div class="value">{total_reviews:,}</div>
                     <div class="label">Total Reviews</div>
                 </div>
-                <div class="metric-card">
-                    <div class="value">{rounds}</div>
-                    <div class="label">Searches Done</div>
-                </div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """, unsafe_allow_html=True
         )
 
-        # Results table — ALL accumulated hospitals
-        import pandas as pd
-
-        df = pd.DataFrame(all_hospitals)
-        display_cols = [
-            "Name", "City", "State", "Address",
-            "Phone", "Website URL", "Rating", "Reviews",
-        ]
+        df = pd.DataFrame(results)
+        display_cols = ["Name", "City", "Address", "Phone", "Website URL", "Rating", "Reviews"]
         df_display = df[[c for c in display_cols if c in df.columns]]
-
-        st.dataframe(
-            df_display,
-            use_container_width=True,
-            hide_index=True,
-            height=min(len(df_display) * 38 + 50, 600),
-        )
-
-        # ------ Load More button ------
+        st.dataframe(df_display, use_container_width=True, hide_index=True, height=min(len(df_display)*38+50, 600))
+        
+        # Downloads
         st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-
-        round_idx = st.session_state.get("search_round", 1)
-        can_load_more = round_idx <= len(SEARCH_OFFSETS)
-
-        if can_load_more:
-            load_more = st.button(
-                f"➕  Load More Results (round {round_idx + 1})",
-                use_container_width=True,
-                key="load_more",
-            )
-            if load_more:
-                if not google_key:
-                    st.error("🔑 Paste your Google Maps API Key in the sidebar.")
-                else:
-                    lat, lng = st.session_state["city_center"]
-                    dlat, dlng = SEARCH_OFFSETS[round_idx - 1]
-                    biased_loc = f"{lat + dlat},{lng + dlng}"
-                    _run_search_round(
-                        google_key,
-                        searched_category,
-                        searched_city,
-                        location=biased_loc,
-                        radius=10000,
-                    )
-                    st.session_state["search_round"] = round_idx + 1
-                    st.rerun()
-        else:
-            st.info("🏁 All search directions exhausted for this city.")
-
-        # ------ Download buttons ------
-        st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-
-        def _strip_pid(records: List[Dict[str, str]]) -> List[Dict[str, str]]:
-            return [{k: v for k, v in h.items() if k != "place_id"} for h in records]
-
-        safe_city = searched_city.split(",")[0].strip().lower().replace(" ", "_")
-        safe_cat = searched_category.strip().lower().replace(" ", "_")
+        st.markdown("##### 📥 Download Results")
+        
+        s_city = st.session_state["city"]
+        s_cat = st.session_state["category"]
+        safe_city = s_city.split(",")[0].strip().replace(" ", "_").lower()
+        safe_cat = s_cat.strip().replace(" ", "_").lower()
         base_filename = f"{safe_city}_{safe_cat}"
+        
+        strip_pid = [{k:v for k,v in h.items() if k != "place_id"} for h in results]
 
-        st.markdown("##### 📥 Download Current Search")
         c1, c2, _ = st.columns([1, 1, 3])
         with c1:
             st.download_button(
-                label="CSV (current)",
-                data=to_csv_bytes(_strip_pid(current_hospitals)),
-                file_name=f"{base_filename}_current.csv",
+                "CSV Dataset",
+                data=to_csv_bytes(strip_pid),
+                file_name=f"{base_filename}.csv",
                 mime="text/csv",
                 use_container_width=True,
+                on_click=log_download_callback,
+                args=(s_city, s_cat)
             )
         with c2:
             st.download_button(
-                label="JSON (current)",
-                data=to_json_bytes(_strip_pid(current_hospitals)),
-                file_name=f"{base_filename}_current.json",
+                "JSON Dataset",
+                data=to_json_bytes(strip_pid),
+                file_name=f"{base_filename}.json",
                 mime="application/json",
                 use_container_width=True,
+                on_click=log_download_callback,
+                args=(s_city, s_cat)
             )
 
-        if len(all_hospitals) > len(current_hospitals):
-            st.markdown("##### 📥 Download All Searches (merged)")
-            a1, a2, _ = st.columns([1, 1, 3])
-            with a1:
-                st.download_button(
-                    label=f"CSV (all {len(all_hospitals)})",
-                    data=to_csv_bytes(_strip_pid(all_hospitals)),
-                    file_name=f"{base_filename}_all.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-            with a2:
-                st.download_button(
-                    label=f"JSON (all {len(all_hospitals)})",
-                    data=to_json_bytes(_strip_pid(all_hospitals)),
-                    file_name=f"{base_filename}_all.json",
-                    mime="application/json",
-                    use_container_width=True,
-                )
-
-    # ---- Footer ----
-    st.markdown(
-        '<div class="footer">Place Finder · Built with Streamlit & Google Maps Places API</div>',
-        unsafe_allow_html=True,
-    )
-
+    st.markdown('<div class="footer">MedMap · Built with Streamlit & Google Maps Places API</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
