@@ -275,16 +275,21 @@ def get_active_users_count():
 # API Search & Processing Functions
 # ============================================================================
 @st.cache_data(show_spinner=False, ttl=86400)
-def geocode_city(_api_key: str, city: str) -> Tuple[Optional[float], Optional[float]]:
+def geocode_city(_api_key: str, city: str) -> Tuple[Optional[float], Optional[float], str]:
     params = {"address": city, "key": _api_key}
-    resp = requests.get(GEOCODING_URL, params=params, timeout=10)
-    log_api_usage(1)
-    if resp.status_code == 200:
-        data = resp.json()
-        if data.get("status") == "OK" and data.get("results"):
-            loc = data["results"][0]["geometry"]["location"]
-            return loc["lat"], loc["lng"]
-    return None, None
+    try:
+        resp = requests.get(GEOCODING_URL, params=params, timeout=10)
+        log_api_usage(1)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") == "OK" and data.get("results"):
+                loc = data["results"][0]["geometry"]["location"]
+                return loc["lat"], loc["lng"], ""
+            else:
+                return None, None, data.get("error_message", data.get("status", "Unknown Google Maps Error"))
+        return None, None, f"HTTP {resp.status_code}: {resp.text}"
+    except Exception as e:
+        return None, None, str(e)
 
 def generate_grid(center_lat: float, center_lng: float) -> List[Tuple[float, float]]:
     # 3x3 grid around city. Spacing ~0.025 deg (approx 2.5km apart)
@@ -471,10 +476,12 @@ def main() -> None:
         log_search(city, category)
 
         with st.spinner("Finding city coordinates..."):
-            lat, lng = geocode_city(google_key, city)
+            lat, lng, geo_error = geocode_city(google_key, city)
             
         if lat is None:
-            st.error(f"Could not find coordinates for city: {city}. Check spelling or API Key permissions.")
+            st.error(f"Could not find coordinates for city: {city}")
+            st.error(f"Geocoding Error: {geo_error}")
+            st.info("💡 Make sure you have enabled the 'Geocoding API' in your Google Cloud Console for this API Key.")
             return
 
         grid = generate_grid(lat, lng)
