@@ -237,7 +237,7 @@ def _search_places_page(
         "X-Goog-FieldMask": (
             "places.id,places.displayName,places.formattedAddress,"
             "places.location,places.rating,places.userRatingCount,"
-            "places.websiteUri,places.formattedPhoneNumber,"
+            "places.websiteUri,places.nationalPhoneNumber,"
             "nextPageToken"
         ),
     }
@@ -248,7 +248,7 @@ def _search_places_page(
         payload["pageToken"] = page_token
     if location and radius:
         lat_str, lng_str = location.split(",")
-        payload["locationRestriction"] = {
+        payload["locationBias"] = {
             "circle": {
                 "center": {
                     "latitude": float(lat_str),
@@ -367,7 +367,7 @@ def extract_place_details(
         "City": city,
         "State": state,
         "Address": address,
-        "Phone": place.get("formattedPhoneNumber", ""),
+        "Phone": place.get("nationalPhoneNumber", place.get("internationalPhoneNumber", "")),
         "Website URL": place.get("websiteUri", ""),
         "Rating": str(place.get("rating", "")),
         "Reviews": str(place.get("userRatingCount", "")),
