@@ -237,7 +237,7 @@ def _search_places_page(
         "X-Goog-FieldMask": (
             "places.id,places.displayName,places.formattedAddress,"
             "places.location,places.rating,places.userRatingCount,"
-            "places.websiteUri,"
+            "places.websiteUri,places.formattedPhoneNumber,"
             "nextPageToken"
         ),
     }
@@ -367,6 +367,7 @@ def extract_place_details(
         "City": city,
         "State": state,
         "Address": address,
+        "Phone": place.get("formattedPhoneNumber", ""),
         "Website URL": place.get("websiteUri", ""),
         "Rating": str(place.get("rating", "")),
         "Reviews": str(place.get("userRatingCount", "")),
@@ -612,7 +613,7 @@ def main() -> None:
         df = pd.DataFrame(all_hospitals)
         display_cols = [
             "Name", "City", "State", "Address",
-            "Website URL", "Rating", "Reviews",
+            "Phone", "Website URL", "Rating", "Reviews",
         ]
         df_display = df[[c for c in display_cols if c in df.columns]]
 
