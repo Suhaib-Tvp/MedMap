@@ -64,8 +64,8 @@ SEARCH_OFFSETS = [
 # Page config — must be first Streamlit call
 # ============================================================================
 st.set_page_config(
-    page_title="Hospital Finder",
-    page_icon="🏥",
+    page_title="Place Finder",
+    page_icon="📍",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -223,7 +223,7 @@ st.markdown(
 # Google Maps Places API — Text Search
 # ============================================================================
 
-def _search_hospitals_page(
+def _search_places_page(
     api_key: str,
     query: str,
     page_token: Optional[str] = None,
@@ -248,7 +248,7 @@ def _search_hospitals_page(
         payload["pageToken"] = page_token
     if location and radius:
         lat_str, lng_str = location.split(",")
-        payload["locationBias"] = {
+        payload["locationRestriction"] = {
             "circle": {
                 "center": {
                     "latitude": float(lat_str),
@@ -275,17 +275,22 @@ def _search_hospitals_page(
     return data.get("places", []), data.get("nextPageToken")
 
 
-def fetch_all_hospitals(
+def fetch_all_places(
     api_key: str,
+    search_category: str,
     city: str,
     location: Optional[str] = None,
     radius: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Fetch all hospital results for *city* with automatic pagination.
-    Optionally biased toward a specific location + radius.
+    Fetch all results for a category + city with automatic pagination.
+    Optionally heavily restricted toward a specific location + radius.
     """
-    query = f"hospitals in {city}"
+    if location:
+        query = search_category
+    else:
+        query = f"{search_category} in {city}"
+        
     all_results: List[Dict[str, Any]] = []
     page_token: Optional[str] = None
 
@@ -293,13 +298,13 @@ def fetch_all_hospitals(
 
     for page_num in range(1, MAX_PAGES + 1):
         try:
-            results, page_token = _search_hospitals_page(
+            results, page_token = _search_places_page(
                 api_key, query, page_token, location, radius
             )
             all_results.extend(results)
             progress_bar.progress(
                 page_num / MAX_PAGES,
-                text=f"Fetched page {page_num} — {len(all_results)} hospitals so far",
+                text=f"Fetched page {page_num} — {len(all_results)} results so far",
             )
 
             if not page_token:
@@ -334,7 +339,7 @@ def compute_centroid(hospitals: List[Dict[str, Any]]) -> Tuple[float, float]:
 # Data extraction
 # ============================================================================
 
-def extract_hospital_details(
+def extract_place_details(
     place: Dict[str, Any],
     default_city: str = "",
     default_state: str = "",
@@ -358,7 +363,7 @@ def extract_hospital_details(
         city = parts[-3].strip()
 
     return {
-        "Hospital Name": name,
+        "Name": name,
         "City": city,
         "State": state,
         "Address": address,
@@ -410,9 +415,9 @@ def main() -> None:
         st.session_state["raw_cache"] = []             # raw results for centroid
 
     # ---- Hero header ----
-    st.markdown('<h1 class="hero-title">🏥 Hospital Finder</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="hero-title">📍 Place Finder</h1>', unsafe_allow_html=True)
     st.markdown(
-        '<p class="hero-sub">Discover hospitals in any city — powered by Google Maps</p>',
+        '<p class="hero-sub">Discover places in any city — powered by Google Maps</p>',
         unsafe_allow_html=True,
     )
 
@@ -430,6 +435,12 @@ def main() -> None:
         st.markdown("---")
         st.markdown("## ⚙️ Search Settings")
 
+        category = st.text_input(
+            "🏷️ Search Category",
+            value="Hospitals",
+            placeholder="e.g. Restaurants, Pharmacies ...",
+        )
+
         city = st.text_input(
             "🌍 City Name",
             value="Hyderabad, India",
@@ -437,7 +448,7 @@ def main() -> None:
         )
 
         st.markdown("---")
-        search_clicked = st.button("🔍  Search Hospitals", use_container_width=True)
+        search_clicked = st.button("🔍  Search", use_container_width=True)
 
         st.markdown("---")
         st.markdown(
@@ -451,45 +462,55 @@ def main() -> None:
     # ------------------------------------------------------------------
     def _run_search_round(
         google_key: str,
+        search_category: str,
         city: str,
         location: Optional[str] = None,
         radius: Optional[int] = None,
     ) -> None:
         """Fetch a batch, deduplicate, enrich, and store in session state."""
         with st.spinner("Searching Google Maps …"):
-            raw_results = fetch_all_hospitals(google_key, city, location, radius)
+            raw_results = fetch_all_places(google_key, search_category, city, location, radius)
 
-        # Filter out duplicates
+        # Filter out duplicates explicitly
         new_results = [
             r for r in raw_results
             if r.get("id") and r["id"] not in st.session_state["seen_ids"]
         ]
 
         if not new_results:
-            st.warning("😕 No new hospitals found. You may have exhausted the area.")
+            st.warning("😕 No new results found. You may have exhausted the area.")
             return
 
         # Parse city defaults
         city_parts = [p.strip() for p in city.split(",")]
         default_city = city_parts[0] if city_parts else ""
         default_state = city_parts[1] if len(city_parts) > 1 else ""
+        target_city_lower = default_city.lower()
 
-        # Extract details
+        # Extract details and strictly filter by city
         batch: List[Dict[str, str]] = []
-        details_progress = st.progress(0, text="Extracting hospital details …")
+        details_progress = st.progress(0, text="Extracting and filtering details …")
         total = len(new_results)
 
         for i, place in enumerate(new_results, 1):
-            batch.append(
-                extract_hospital_details(place, default_city, default_state)
-            )
+            details = extract_place_details(place, default_city, default_state)
+            
+            # Strict city filter: ensure the searched city is in the full address or parsed city
+            addr_lower = details["Address"].lower()
+            city_lower = details["City"].lower()
+            if target_city_lower in addr_lower or target_city_lower == city_lower:
+                batch.append(details)
+                
             details_progress.progress(
                 i / total,
-                text=f"Processed {i} / {total} hospitals",
+                text=f"Processed {i} / {total} results",
             )
 
         details_progress.empty()
 
+        if not batch:
+            st.warning("😕 No results strictly matched the searched city. You may have exhausted its boundaries.")
+            return
 
         # Update session state
         for h in batch:
@@ -522,8 +543,9 @@ def main() -> None:
         st.session_state["city_center"] = (0.0, 0.0)
         st.session_state["raw_cache"] = []
         st.session_state["city"] = city
+        st.session_state["category"] = category
 
-        _run_search_round(google_key, city)
+        _run_search_round(google_key, category, city)
         st.session_state["search_round"] = 1
 
     # ------------------------------------------------------------------
@@ -532,6 +554,7 @@ def main() -> None:
     all_hospitals = st.session_state.get("all_hospitals", [])
     current_hospitals = st.session_state.get("current_hospitals", [])
     searched_city = st.session_state.get("city", "")
+    searched_category = st.session_state.get("category", "")
 
     if all_hospitals:
         st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
@@ -560,7 +583,7 @@ def main() -> None:
             <div class="metric-row">
                 <div class="metric-card">
                     <div class="value">{len(all_hospitals)}</div>
-                    <div class="label">Total Hospitals</div>
+                    <div class="label">Total Results</div>
                 </div>
                 <div class="metric-card">
                     <div class="value">{len(current_hospitals)}</div>
@@ -588,7 +611,7 @@ def main() -> None:
 
         df = pd.DataFrame(all_hospitals)
         display_cols = [
-            "Hospital Name", "City", "State", "Address",
+            "Name", "City", "State", "Address",
             "Website URL", "Rating", "Reviews",
         ]
         df_display = df[[c for c in display_cols if c in df.columns]]
@@ -608,7 +631,7 @@ def main() -> None:
 
         if can_load_more:
             load_more = st.button(
-                f"➕  Load More Hospitals (round {round_idx + 1})",
+                f"➕  Load More Results (round {round_idx + 1})",
                 use_container_width=True,
                 key="load_more",
             )
@@ -621,6 +644,7 @@ def main() -> None:
                     biased_loc = f"{lat + dlat},{lng + dlng}"
                     _run_search_round(
                         google_key,
+                        searched_category,
                         searched_city,
                         location=biased_loc,
                         radius=10000,
@@ -636,13 +660,17 @@ def main() -> None:
         def _strip_pid(records: List[Dict[str, str]]) -> List[Dict[str, str]]:
             return [{k: v for k, v in h.items() if k != "place_id"} for h in records]
 
+        safe_city = searched_city.split(",")[0].strip().lower().replace(" ", "_")
+        safe_cat = searched_category.strip().lower().replace(" ", "_")
+        base_filename = f"{safe_city}_{safe_cat}"
+
         st.markdown("##### 📥 Download Current Search")
         c1, c2, _ = st.columns([1, 1, 3])
         with c1:
             st.download_button(
                 label="CSV (current)",
                 data=to_csv_bytes(_strip_pid(current_hospitals)),
-                file_name="hospitals_current.csv",
+                file_name=f"{base_filename}_current.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -650,7 +678,7 @@ def main() -> None:
             st.download_button(
                 label="JSON (current)",
                 data=to_json_bytes(_strip_pid(current_hospitals)),
-                file_name="hospitals_current.json",
+                file_name=f"{base_filename}_current.json",
                 mime="application/json",
                 use_container_width=True,
             )
@@ -662,7 +690,7 @@ def main() -> None:
                 st.download_button(
                     label=f"CSV (all {len(all_hospitals)})",
                     data=to_csv_bytes(_strip_pid(all_hospitals)),
-                    file_name="hospitals_all.csv",
+                    file_name=f"{base_filename}_all.csv",
                     mime="text/csv",
                     use_container_width=True,
                 )
@@ -670,14 +698,14 @@ def main() -> None:
                 st.download_button(
                     label=f"JSON (all {len(all_hospitals)})",
                     data=to_json_bytes(_strip_pid(all_hospitals)),
-                    file_name="hospitals_all.json",
+                    file_name=f"{base_filename}_all.json",
                     mime="application/json",
                     use_container_width=True,
                 )
 
     # ---- Footer ----
     st.markdown(
-        '<div class="footer">Hospital Finder · Built with Streamlit & Google Maps Places API</div>',
+        '<div class="footer">Place Finder · Built with Streamlit & Google Maps Places API</div>',
         unsafe_allow_html=True,
     )
 
