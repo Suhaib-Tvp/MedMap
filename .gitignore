@@ -1,0 +1,12 @@
+# Environment secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Output files (optional — remove these lines if you want to track outputs)
+*.csv
+*.json
