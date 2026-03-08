@@ -1,18 +1,19 @@
-# 🏥 MedMap
+# 📍 MedMap
 
-**MedMap** is a fast, interactive Streamlit web application that retrieves hospital data from the **Google Maps Places API** for any given city. It allows location-biased searching to discover hundreds of unique hospitals, with easy exports to CSV and JSON formats.
+**MedMap** is a fast, interactive Streamlit web application that retrieves place data using the **Google Maps Places API (New)** & **Geocoding API**. It utilizes a dynamic 3x3 geographic grid search to bypass Google's result limits, discovering hundreds of unique places (hospitals, pharmacies, clinics, etc.) in any given city, with easy exports to CSV and JSON formats.
+
+It features a permanent **Supabase** backend to automatically log search history, download history, monitor active sessions, and dynamically track Google API credit usage across Streamlit Community Cloud reboots.
 
 ---
 
 ## ✨ Features
 
-- **🔍 Interactive UI**: Beautiful, premium Streamlit interface.
-- **📄 Automatic Pagination**: Fetches up to 60 results per batch seamlessly.
-- **➕ Load More**: Intelligently shifts the search radius iteratively across 16 compass directions to discover hospitals that Google Maps hides behind its 60-result hard limit.
-- **🛡️ Deduplication**: Automatically removes duplicate entries across search rounds.
-- **🌐 Website Retrieval**: Specifically fetches the official website for each hospital via the Place Details API.
-- **📊 Export Options**: Download your current search batch, or download a merged file containing all accumulated searches in both CSV and JSON.
-- **🔒 Secure**: API keys are entered directly into the browser session via the UI and are never saved to disk. Safe for GitHub and public deployment.
+- **🔍 Generic Search**: Search for *any* place category (not just hospitals) in any city worldwide.
+- **🗺️ Geographic Grid Search**: Automatically geocodes your target city and launches a 3x3 radius search algorithm to extract 150+ unique places per query.
+- **🛡️ Deduplication & Strict Filtering**: Removes duplicates automatically and strictly validates that results belong inside the target city limits.
+- **🌐 Efficient Data Extraction**: Fetches details, ratings, international phone numbers, and official websites in a single, optimized request using FieldMasks.
+- **📈 API Usage Dashboard**: Built-in monitoring connects to Supabase to calculate your monthly Google Maps API usage in real-time, warning you at 70% and dynamically blocking requests at 1000/month to guarantee you remain within the free tier.
+- **🗃️ Persistent Cloud History**: Uses `supabase-py` so your search logs, download history, and session tracking survive ephemeral Streamlit Cloud container reboots.
 
 ---
 
@@ -21,7 +22,8 @@
 ### 1. Prerequisites
 
 - Python 3.9+
-- A [Google Maps API key](https://console.cloud.google.com/apis/credentials) with the **Places API** enabled.
+- A [Google Cloud Console](https://console.cloud.google.com/apis/credentials) project with the **Places API (New)** AND **Geocoding API** enabled.
+- A free [Supabase](https://supabase.com/) project (with the Data API enabled).
 
 ### 2. Install Dependencies
 
@@ -34,9 +36,17 @@ source venv/bin/activate   # Linux/macOS
 pip install -r requirements.txt
 ```
 
-### 3. Run the App
+### 3. Setup Environment Variables
 
-Instead of configuring `.env` files, simply launch the app directly:
+Create a local `.env` file in the root directory (do not commit this to GitHub) and add your keys:
+
+```env
+GOOGLE_MAPS_API_KEY="your_google_key"
+SUPABASE_URL="https://your_project.supabase.co"
+SUPABASE_KEY="your_public_anon_key"
+```
+
+### 4. Run the App
 
 ```bash
 streamlit run app.py
@@ -44,38 +54,45 @@ streamlit run app.py
 
 The application will open in your default web browser (usually at `http://localhost:8501`).
 
-### 4. How to Use
-
-1. **Enter API Key**: Paste your Google Maps API Key into the sidebar's password field.
-2. **Search**: Enter a city name (e.g., "Hyderabad, India") and click **Search Hospitals**.
-3. **Load More**: To discover hospitals beyond the initial 60, click the **Load More Hospitals** button at the bottom of the table.
-4. **Download**: Use the download buttons to export your data to CSV or JSON.
-
 ---
 
 ## 📦 Project Structure
 
 ```text
 medmap/
-├── app.py                # Main Streamlit application
-├── requirements.txt      # Python dependencies (streamlit, requests, pandas)
-└── README.md             # This file
+├── app.py                # Main Streamlit application with Supabase integration
+├── requirements.txt      # Python dependencies (streamlit, requests, pandas, supabase, httpx)
+└── README.md             # This document
 ```
 
 ---
 
 ## 🌍 Export Format
 
-The generated CSV and JSON files will contain the following columns/keys:
+The dynamically generated CSV/JSON exports (e.g., `kochi_pharmacy.csv`) will always contain:
 
-- `Hospital Name`
+- `Name`
 - `City`
-- `State`
 - `Address`
+- `Phone` (International/National)
 - `Website URL`
 - `Rating`
 - `Reviews`
 
 ---
 
+## 🛠️ Deploying to Streamlit Community Cloud
 
+MedMap is designed to securely run 24/7 on Streamlit Cloud:
+
+1. Push this repository to GitHub. Ensure `.env` is omitted.
+2. Go to [share.streamlit.io](https://share.streamlit.io) and connect your GitHub account.
+3. Select your repository and launch `app.py`.
+4. **CRITICAL:** Before deploying, navigate to **Advanced Settings -> Secrets** and paste your production keys:
+
+```toml
+GOOGLE_MAPS_API_KEY="AIzaSy..."
+SUPABASE_URL="https://your_project.supabase.co"
+SUPABASE_KEY="sb_publishable_..."
+```
+5. Click **Deploy**. Your Dashboard and History panels will remain perfectly synchronized with Supabase moving forward!
