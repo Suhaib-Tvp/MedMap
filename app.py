@@ -8,7 +8,6 @@ import csv
 import io
 import json
 import logging
-import sqlite3
 import time
 import uuid
 import datetime
@@ -18,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 import streamlit as st
 import pandas as pd
+from supabase import create_client, Client
 
 # ---------------------------------------------------------------------------
 # Logging & Constants
@@ -29,7 +29,6 @@ PLACES_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 GEOCODING_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 MAX_PAGES = 3
 PAGE_TOKEN_DELAY_SECONDS = 1.0
-DB_NAME = "medmap_history.db"
 API_LIMIT_MONTHLY = 1000
 
 # ============================================================================
@@ -179,97 +178,78 @@ st.markdown(
 )
 
 # ============================================================================
-# Database Setup & Helpers
+# Database Setup & Helpers (Supabase)
 # ============================================================================
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS search_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    city TEXT,
-                    keyword TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS downloads (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    city TEXT,
-                    keyword TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS api_usage (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS user_sessions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT UNIQUE,
-                    city TEXT,
-                    keyword TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    conn.commit()
-    conn.close()
+@st.cache_resource
+def init_supabase() -> Client:
+    url = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))
+    key = st.secrets.get("SUPABASE_KEY", os.getenv("SUPABASE_KEY", ""))
+    return create_client(url, key)
+
+supabase: Client = init_supabase()
 
 def log_api_usage(count=1):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    for _ in range(count):
-        c.execute("INSERT INTO api_usage DEFAULT VALUES")
-    conn.commit()
-    conn.close()
+    try:
+        data = []
+        for _ in range(count):
+            data.append({}) 
+        supabase.table("api_usage").insert(data).execute()
+    except Exception as e:
+        logger.error(f"Failed to log API usage: {e}")
 
-def get_monthly_api_usage():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM api_usage WHERE strftime('%Y-%m', timestamp) = strftime('%Y-%m', 'now')")
-    count = c.fetchone()[0]
-    conn.close()
-    return count
+def get_monthly_api_usage() -> int:
+    try:
+        now = datetime.datetime.now()
+        start_of_month = datetime.datetime(now.year, now.month, 1).isoformat()
+        response = supabase.table("api_usage").select("*", count="exact").gte("timestamp", start_of_month).execute()
+        return response.count if response.count is not None else 0
+    except Exception as e:
+        logger.error(f"Failed to fetch API usage count: {e}")
+        return 0
 
-def log_search(city, keyword):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO search_history (city, keyword) VALUES (?, ?)", (city, keyword))
-    conn.commit()
-    conn.close()
+def log_search(city: str, keyword: str):
+    try:
+        supabase.table("search_history").insert({"city": city, "keyword": keyword}).execute()
+    except Exception as e:
+        logger.error(f"Failed to log search: {e}")
 
-def get_recent_searches(limit=10):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT city, keyword, timestamp FROM search_history ORDER BY timestamp DESC LIMIT ?", (limit,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
+def get_recent_searches(limit=10) -> List[Tuple[str, str, str]]:
+    try:
+        response = supabase.table("search_history").select("city, keyword, timestamp").order("timestamp", desc=True).limit(limit).execute()
+        return [(r['city'], r['keyword'], r['timestamp']) for r in response.data]
+    except Exception as e:
+        logger.error(f"Failed to fetch recent searches: {e}")
+        return []
 
-def log_download(city, keyword):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO downloads (city, keyword) VALUES (?, ?)", (city, keyword))
-    conn.commit()
-    conn.close()
+def log_download(city: str, keyword: str):
+    try:
+        supabase.table("downloads").insert({"city": city, "keyword": keyword}).execute()
+    except Exception as e:
+        logger.error(f"Failed to log download: {e}")
 
-def get_recent_downloads(limit=5):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT city, keyword, timestamp FROM downloads ORDER BY timestamp DESC LIMIT ?", (limit,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
+def get_recent_downloads(limit=5) -> List[Tuple[str, str, str]]:
+    try:
+        response = supabase.table("downloads").select("city, keyword, timestamp").order("timestamp", desc=True).limit(limit).execute()
+        return [(r['city'], r['keyword'], r['timestamp']) for r in response.data]
+    except Exception as e:
+        logger.error(f"Failed to fetch recent downloads: {e}")
+        return []
 
-def update_user_session(session_id, city="", keyword=""):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''INSERT INTO user_sessions (session_id, city, keyword, timestamp) 
-                 VALUES (?, ?, ?, CURRENT_TIMESTAMP) 
-                 ON CONFLICT(session_id) 
-                 DO UPDATE SET city=excluded.city, keyword=excluded.keyword, timestamp=CURRENT_TIMESTAMP''', 
-              (session_id, city, keyword))
-    conn.commit()
-    conn.close()
+def update_user_session(session_id: str, city: str = "", keyword: str = ""):
+    try:
+        now = datetime.datetime.now().isoformat()
+        supabase.table("user_sessions").upsert({"session_id": session_id, "city": city, "keyword": keyword, "timestamp": now}).execute()
+    except Exception as e:
+        logger.error(f"Failed to update session: {e}")
 
-def get_active_users_count():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(DISTINCT session_id) FROM user_sessions WHERE timestamp >= datetime('now', '-1 day')")
-    count = c.fetchone()[0]
-    conn.close()
-    return count
+def get_active_users_count() -> int:
+    try:
+        yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).isoformat()
+        response = supabase.table("user_sessions").select("session_id", count="exact").gte("timestamp", yesterday).execute()
+        return response.count if response.count is not None else 0
+    except Exception as e:
+        logger.error(f"Failed to fetch active users: {e}")
+        return 0
 
 # ============================================================================
 # API Search & Processing Functions
@@ -380,8 +360,6 @@ def log_download_callback(city, keyword):
 # Main UI
 # ============================================================================
 def main() -> None:
-    init_db()
-
     if "session_id" not in st.session_state:
         st.session_state["session_id"] = str(uuid.uuid4())
         update_user_session(st.session_state["session_id"])
@@ -404,9 +382,9 @@ def main() -> None:
             
         if secure_key:
             google_key = secure_key
-            st.success("✅ Secure API Key Loaded")
+            st.success("✅ Secure Google Maps API Key Loaded")
         else:
-            google_key = st.text_input("🔑 API Key", type="password", help="Get yours at Google Cloud Console")
+            google_key = st.text_input("🔑 Google Maps API Key", type="password", help="Get yours at Google Cloud Console")
         
         category = st.text_input("🏷️ Search keyword", value="hospital", placeholder="hospital")
         city = st.text_input("🌍 City Name", value="Hyderabad, India", placeholder="e.g. New Delhi, India")
@@ -440,7 +418,7 @@ def main() -> None:
         recent_searches = get_recent_searches()
         if recent_searches:
             for s_city, s_cat, s_time in recent_searches:
-                st.caption(f"{s_cat} in {s_city} ({s_time[:16]})")
+                st.caption(f"{s_cat} in {s_city} ({s_time[:16].replace('T', ' ')})")
         else:
             st.caption("No recent searches.")
             
@@ -451,7 +429,7 @@ def main() -> None:
         recent_dl = get_recent_downloads()
         if recent_dl:
             for d_city, d_cat, d_time in recent_dl:
-                st.caption(f"{d_city}_{d_cat} ({d_time[:16]})")
+                st.caption(f"{d_city}_{d_cat} ({d_time[:16].replace('T', ' ')})")
         else:
             st.caption("No recent downloads.")
             
