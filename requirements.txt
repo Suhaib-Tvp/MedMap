@@ -3,3 +3,5 @@ requests>=2.31.0
 pandas>=2.0.0
 
 
+supabase>=2.3.4
+httpx>=0.24.0
