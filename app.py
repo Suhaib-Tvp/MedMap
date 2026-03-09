@@ -26,8 +26,29 @@ logger = logging.getLogger(__name__)
 
 PLACES_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 MAX_PAGES = 3
-PAGE_TOKEN_DELAY_SECONDS = 1.0
+PAGE_TOKEN_DELAY_SECONDS = 2
 API_LIMIT_MONTHLY = 1000
+
+# Compass offsets (lat_delta, lng_delta) used by "Load More" to bias
+# the search toward different parts of the city.  ~0.045° ≈ 5 km.
+SEARCH_OFFSETS = [
+    ( 0.045,  0.000),   # N
+    ( 0.045,  0.045),   # NE
+    ( 0.000,  0.045),   # E
+    (-0.045,  0.045),   # SE
+    (-0.045,  0.000),   # S
+    (-0.045, -0.045),   # SW
+    ( 0.000, -0.045),   # W
+    ( 0.045, -0.045),   # NW
+    ( 0.090,  0.000),   # far N
+    ( 0.000,  0.090),   # far E
+    (-0.090,  0.000),   # far S
+    ( 0.000, -0.090),   # far W
+    ( 0.090,  0.090),   # far NE
+    (-0.090, -0.090),   # far SW
+    ( 0.090, -0.090),   # far NW
+    (-0.090,  0.090),   # far SE
+]
 
 # ============================================================================
 # Page config & CSS
@@ -235,56 +256,89 @@ def get_recent_downloads(limit=5) -> List[Tuple[str, str, str]]:
 
 
 # ============================================================================
-# API Search & Processing Functions
+# Google Maps Places API — Text Search
 # ============================================================================
-def _fetch_one_page(
-    api_key: str, query: str, page_token: Optional[str] = None
+def _search_places_page(
+    api_key: str,
+    query: str,
+    page_token: Optional[str] = None,
+    location: Optional[str] = None,
+    radius: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """Fetch a single page of Places results. Returns (places, next_page_token)."""
+    """Execute a single Places Text Search request."""
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": api_key,
         "X-Goog-FieldMask": (
             "places.id,places.displayName,places.formattedAddress,"
-            "places.rating,places.userRatingCount,places.websiteUri,"
-            "places.nationalPhoneNumber,places.internationalPhoneNumber,"
+            "places.location,places.rating,places.userRatingCount,"
+            "places.websiteUri,places.nationalPhoneNumber,"
+            "places.internationalPhoneNumber,"
             "nextPageToken"
         ),
     }
     payload: Dict[str, Any] = {"textQuery": query}
     if page_token:
         payload["pageToken"] = page_token
+    if location and radius:
+        lat_str, lng_str = location.split(",")
+        payload["locationBias"] = {
+            "circle": {
+                "center": {
+                    "latitude": float(lat_str),
+                    "longitude": float(lng_str),
+                },
+                "radius": float(radius),
+            }
+        }
 
     resp = requests.post(PLACES_TEXT_SEARCH_URL, headers=headers, json=payload, timeout=30)
     log_api_usage(1)
 
     if resp.status_code == 200:
         data = resp.json()
-        places = data.get("places", [])
-        next_token = data.get("nextPageToken")
-        return places, next_token
+        return data.get("places", []), data.get("nextPageToken")
     else:
         logger.error(f"Places API error {resp.status_code}: {resp.text}")
         return [], None
 
 
-def fetch_places_batch(
-    api_key: str, category: str, city: str,
-    page_token: Optional[str] = None, max_pages: int = MAX_PAGES
-) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """Fetch up to max_pages of results. Returns (all_places, last_next_page_token)."""
-    all_raw: List[Dict[str, Any]] = []
-    query = f"{category} in {city}"
-    token = page_token
+def fetch_all_places(
+    api_key: str,
+    search_category: str,
+    city: str,
+    location: Optional[str] = None,
+    radius: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Fetch all results with automatic pagination (up to MAX_PAGES)."""
+    query = search_category if location else f"{search_category} in {city}"
+    all_results: List[Dict[str, Any]] = []
+    page_token: Optional[str] = None
 
-    for _ in range(max_pages):
-        places, token = _fetch_one_page(api_key, query, token)
-        all_raw.extend(places)
-        if not token:
+    for page_num in range(1, MAX_PAGES + 1):
+        results, page_token = _search_places_page(
+            api_key, query, page_token, location, radius
+        )
+        all_results.extend(results)
+        if not page_token:
             break
         time.sleep(PAGE_TOKEN_DELAY_SECONDS)
 
-    return all_raw, token
+    return all_results
+
+
+def compute_centroid(places: List[Dict[str, Any]]) -> Tuple[float, float]:
+    """Return the average (lat, lng) from a list of raw place results."""
+    lats, lngs = [], []
+    for p in places:
+        loc = p.get("location", {})
+        if "latitude" in loc and "longitude" in loc:
+            lats.append(loc["latitude"])
+            lngs.append(loc["longitude"])
+    if not lats:
+        return 0.0, 0.0
+    return sum(lats) / len(lats), sum(lngs) / len(lngs)
+
 
 def extract_place_details(place: Dict[str, Any], default_city: str = "") -> Dict[str, str]:
     name_dict = place.get("displayName", {})
@@ -307,6 +361,7 @@ def extract_place_details(place: Dict[str, Any], default_city: str = "") -> Dict
         "place_id": place.get("id", ""),
     }
 
+
 def to_csv_bytes(records: List[Dict[str, str]]) -> bytes:
     if not records:
         return b""
@@ -326,22 +381,33 @@ def log_download_callback(city, keyword):
 # Main UI
 # ============================================================================
 def main() -> None:
+    # ---- Initialise session state ----
+    if "all_results" not in st.session_state:
+        st.session_state["all_results"] = []
+    if "current_batch" not in st.session_state:
+        st.session_state["current_batch"] = []
+    if "seen_ids" not in st.session_state:
+        st.session_state["seen_ids"] = set()
+    if "search_round" not in st.session_state:
+        st.session_state["search_round"] = 0
+    if "city_center" not in st.session_state:
+        st.session_state["city_center"] = (0.0, 0.0)
+    if "raw_cache" not in st.session_state:
+        st.session_state["raw_cache"] = []
 
     st.markdown('<h1 class="hero-title">📍 MedMap</h1>', unsafe_allow_html=True)
     st.markdown('<p class="hero-sub">Discover places in any city — powered by Google Maps</p>', unsafe_allow_html=True)
 
     with st.sidebar:
         st.markdown("## ⚙️ Search Settings")
-        
         google_key = st.text_input("🔑 Google Maps API Key", type="password", help="Paste your active Google Cloud API key here")
-        
         category = st.text_input("🏷️ Search keyword", value="hospital", placeholder="hospital")
         city = st.text_input("🌍 City Name", value="Hyderabad, India", placeholder="e.g. New Delhi, India")
         search_clicked = st.button("🔍  Search", use_container_width=True)
 
         st.markdown("---")
-        
-        # 11, 12. API Usage Dashboard & Alerts
+
+        # API Usage Dashboard
         st.markdown("## 📊 Google API Usage")
         monthly_usage = get_monthly_api_usage()
         remaining = max(0, API_LIMIT_MONTHLY - monthly_usage)
@@ -359,10 +425,10 @@ def main() -> None:
             st.error("🚨 Danger: API usage > 90%!")
         elif usage_pct >= 70:
             st.warning("⚠ API usage getting high this month.")
-            
+
         st.markdown("---")
-        
-        # 7. Search History
+
+        # Search History
         st.markdown("## 🕒 Search History")
         recent_searches = get_recent_searches()
         if recent_searches:
@@ -370,10 +436,10 @@ def main() -> None:
                 st.caption(f"{s_cat} in {s_city} ({s_time[:16].replace('T', ' ')})")
         else:
             st.caption("No recent searches.")
-            
+
         st.markdown("---")
-        
-        # 8. Downloaded Datasets
+
+        # Downloaded Datasets
         st.markdown("## 📥 Downloaded Datasets")
         recent_dl = get_recent_downloads()
         if recent_dl:
@@ -381,9 +447,59 @@ def main() -> None:
                 st.caption(f"{d_city}_{d_cat} ({d_time[:16].replace('T', ' ')})")
         else:
             st.caption("No recent downloads.")
-            
+
         st.markdown("<div style='color:#55556e;font-size:0.75rem;text-align:center;margin-top:20px'>Data via Google Maps Places API</div>", unsafe_allow_html=True)
 
+    # ------------------------------------------------------------------
+    # Helper: run one search round, deduplicate, and append to state
+    # ------------------------------------------------------------------
+    def _run_search_round(
+        google_key: str,
+        search_category: str,
+        city: str,
+        location: Optional[str] = None,
+        radius: Optional[int] = None,
+    ) -> None:
+        with st.spinner("Searching Google Maps …"):
+            raw_results = fetch_all_places(google_key, search_category, city, location, radius)
+
+        # Filter out duplicates
+        new_results = [
+            r for r in raw_results
+            if r.get("id") and r["id"] not in st.session_state["seen_ids"]
+        ]
+
+        if not new_results:
+            st.warning("😕 No new results found. You may have exhausted the area.")
+            return
+
+        # Extract details and filter by city
+        target_city_lower = city.split(",")[0].strip().lower()
+        batch: List[Dict[str, str]] = []
+        for place in new_results:
+            details = extract_place_details(place, default_city=target_city_lower)
+            addr_lower = details["Address"].lower()
+            city_lower = details["City"].lower()
+            if target_city_lower in addr_lower or target_city_lower == city_lower:
+                batch.append(details)
+
+        if not batch:
+            st.warning("😕 No results strictly matched the searched city.")
+            return
+
+        # Update session state
+        for h in batch:
+            st.session_state["seen_ids"].add(h["place_id"])
+        st.session_state["current_batch"] = batch
+        st.session_state["all_results"].extend(batch)
+
+        # Store raw results for centroid
+        st.session_state["raw_cache"].extend(new_results)
+        st.session_state["city_center"] = compute_centroid(st.session_state["raw_cache"])
+
+    # ------------------------------------------------------------------
+    # "Search" button — fresh search, resets state
+    # ------------------------------------------------------------------
     if search_clicked:
         if usage_error:
             st.error("Cannot perform search: API limit reached. Please check back next month.")
@@ -392,53 +508,36 @@ def main() -> None:
             st.error("🔑 **Google Maps API Key** is missing. Paste your key in the sidebar.")
             return
 
-        log_search(city, category)
-
-        with st.spinner(f"Searching for {category} in {city}..."):
-            raw_results, next_token = fetch_places_batch(google_key, category, city)
-
-        # Deduplication
-        seen = set()
-        unique_places = []
-        for r in raw_results:
-            pid = r.get("id")
-            if pid and pid not in seen:
-                seen.add(pid)
-                unique_places.append(r)
-
-        if not unique_places:
-            st.warning("😕 No results found. Try a different keyword or city.")
-            return
-
-        # Extract details
-        target_city_lower = city.split(",")[0].strip().lower()
-        batch = []
-        for place in unique_places:
-            details = extract_place_details(place, default_city=target_city_lower)
-            batch.append(details)
-
-        if not batch:
-            st.warning("😕 No results found.")
-            return
-
-        st.session_state["results"] = batch
-        st.session_state["all_results"] = list(batch)  # cumulative across rounds
-        st.session_state["current_batch"] = list(batch)
-        st.session_state["seen_ids"] = seen
-        st.session_state["next_page_token"] = next_token
-        st.session_state["search_round"] = 1
+        # Reset state for new search
+        st.session_state["all_results"] = []
+        st.session_state["current_batch"] = []
+        st.session_state["seen_ids"] = set()
+        st.session_state["search_round"] = 0
+        st.session_state["city_center"] = (0.0, 0.0)
+        st.session_state["raw_cache"] = []
         st.session_state["city"] = city
         st.session_state["category"] = category
 
-    results = st.session_state.get("results", [])
-    if results:
+        log_search(city, category)
+        _run_search_round(google_key, category, city)
+        st.session_state["search_round"] = 1
+
+    # ------------------------------------------------------------------
+    # Display results
+    # ------------------------------------------------------------------
+    all_results = st.session_state.get("all_results", [])
+    current_batch = st.session_state.get("current_batch", [])
+    searched_city = st.session_state.get("city", "")
+    searched_category = st.session_state.get("category", "")
+
+    if all_results:
         st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-        
-        # Calculate stats
+
+        # Stats
         avg_rating = 0
         rated_count = 0
         total_reviews = 0
-        for h in results:
+        for h in all_results:
             try:
                 avg_rating += float(h["Rating"])
                 rated_count += 1
@@ -449,14 +548,18 @@ def main() -> None:
             except ValueError:
                 pass
         avg_rating = round(avg_rating / rated_count, 1) if rated_count else 0
-        
-        search_round = st.session_state.get("search_round", 1)
+        rounds = st.session_state.get("search_round", 1)
+
         st.markdown(
             f"""
             <div class="metric-row">
                 <div class="metric-card">
-                    <div class="value">{len(results)}</div>
-                    <div class="label">Total Unique Results</div>
+                    <div class="value">{len(all_results)}</div>
+                    <div class="label">Total Results</div>
+                </div>
+                <div class="metric-card">
+                    <div class="value">{len(current_batch)}</div>
+                    <div class="label">Latest Batch</div>
                 </div>
                 <div class="metric-card">
                     <div class="value">⭐ {avg_rating}</div>
@@ -467,114 +570,105 @@ def main() -> None:
                     <div class="label">Total Reviews</div>
                 </div>
                 <div class="metric-card">
-                    <div class="value">{search_round}</div>
-                    <div class="label">Search Round</div>
+                    <div class="value">{rounds}</div>
+                    <div class="label">Searches Done</div>
                 </div>
             </div>
             """, unsafe_allow_html=True
         )
 
-        df = pd.DataFrame(results)
+        df = pd.DataFrame(all_results)
         display_cols = ["Name", "City", "Address", "Phone", "Website URL", "Rating", "Reviews"]
         df_display = df[[c for c in display_cols if c in df.columns]]
         st.dataframe(df_display, use_container_width=True, hide_index=True, height=min(len(df_display)*38+50, 600))
 
-        # ---------- Load More Button ----------
+        # ------ Load More button ------
         st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-        if google_key:
-            next_token = st.session_state.get("next_page_token")
-            if next_token:
-                if st.button("➕ Load More Results", use_container_width=True, key="load_more"):
-                    with st.spinner("Fetching more results..."):
-                        more_raw, new_token = fetch_places_batch(
-                            google_key,
-                            st.session_state["category"],
-                            st.session_state["city"],
-                            page_token=next_token,
-                            max_pages=MAX_PAGES,
-                        )
 
-                    seen_ids = st.session_state.get("seen_ids", set())
-                    target_city_lower = st.session_state["city"].split(",")[0].strip().lower()
-                    new_batch = []
-                    for r in more_raw:
-                        pid = r.get("id")
-                        if pid and pid not in seen_ids:
-                            seen_ids.add(pid)
-                            details = extract_place_details(r, default_city=target_city_lower)
-                            new_batch.append(details)
+        round_idx = st.session_state.get("search_round", 1)
+        can_load_more = round_idx <= len(SEARCH_OFFSETS)
 
-                    if new_batch:
-                        st.session_state["results"].extend(new_batch)
-                        st.session_state["all_results"].extend(new_batch)
-                        st.session_state["current_batch"] = new_batch
-                        st.session_state["seen_ids"] = seen_ids
-                        st.session_state["search_round"] = st.session_state.get("search_round", 1) + 1
-
-                    st.session_state["next_page_token"] = new_token
+        if can_load_more:
+            load_more = st.button(
+                f"➕  Load More Results (round {round_idx + 1} of {len(SEARCH_OFFSETS) + 1})",
+                use_container_width=True,
+                key="load_more",
+            )
+            if load_more:
+                if not google_key:
+                    st.error("🔑 Paste your Google Maps API Key in the sidebar.")
+                else:
+                    lat, lng = st.session_state["city_center"]
+                    dlat, dlng = SEARCH_OFFSETS[round_idx - 1]
+                    biased_loc = f"{lat + dlat},{lng + dlng}"
+                    _run_search_round(
+                        google_key,
+                        searched_category,
+                        searched_city,
+                        location=biased_loc,
+                        radius=10000,
+                    )
+                    st.session_state["search_round"] = round_idx + 1
                     st.rerun()
-            else:
-                st.info("✅ All available results have been loaded. No more pages from Google.")
-        
-        # ---------- Downloads Section ----------
+        else:
+            st.info("🏁 All 16 search directions exhausted for this city.")
+
+        # ------ Download buttons ------
         st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-        st.markdown("##### 📥 Download Results")
-        
-        s_city = st.session_state["city"]
-        s_cat = st.session_state["category"]
-        safe_city = s_city.split(",")[0].strip().replace(" ", "_").lower()
-        safe_cat = s_cat.strip().replace(" ", "_").lower()
+
+        def _strip_pid(records):
+            return [{k: v for k, v in h.items() if k != "place_id"} for h in records]
+
+        safe_city = searched_city.split(",")[0].strip().lower().replace(" ", "_")
+        safe_cat = searched_category.strip().lower().replace(" ", "_")
         base_filename = f"{safe_city}_{safe_cat}"
 
-        current_batch = st.session_state.get("current_batch", results)
-        all_results = st.session_state.get("all_results", results)
-        
-        strip_current = [{k:v for k,v in h.items() if k != "place_id"} for h in current_batch]
-        strip_all = [{k:v for k,v in h.items() if k != "place_id"} for h in all_results]
-
-        st.markdown(f"**Current Batch:** {len(strip_current)} records &nbsp;|&nbsp; **All Batches:** {len(strip_all)} records")
-
-        c1, c2, c3, c4 = st.columns(4)
+        st.markdown("##### 📥 Download Current Batch")
+        c1, c2, _ = st.columns([1, 1, 3])
         with c1:
             st.download_button(
-                "📄 Current Batch CSV",
-                data=to_csv_bytes(strip_current),
-                file_name=f"{base_filename}_batch.csv",
+                "CSV (current)",
+                data=to_csv_bytes(_strip_pid(current_batch)),
+                file_name=f"{base_filename}_current.csv",
                 mime="text/csv",
                 use_container_width=True,
                 on_click=log_download_callback,
-                args=(s_city, s_cat)
+                args=(searched_city, searched_category),
             )
         with c2:
             st.download_button(
-                "📄 Current Batch JSON",
-                data=to_json_bytes(strip_current),
-                file_name=f"{base_filename}_batch.json",
+                "JSON (current)",
+                data=to_json_bytes(_strip_pid(current_batch)),
+                file_name=f"{base_filename}_current.json",
                 mime="application/json",
                 use_container_width=True,
                 on_click=log_download_callback,
-                args=(s_city, s_cat)
+                args=(searched_city, searched_category),
             )
-        with c3:
-            st.download_button(
-                "📦 All Batches CSV",
-                data=to_csv_bytes(strip_all),
-                file_name=f"{base_filename}_all.csv",
-                mime="text/csv",
-                use_container_width=True,
-                on_click=log_download_callback,
-                args=(s_city, s_cat)
-            )
-        with c4:
-            st.download_button(
-                "📦 All Batches JSON",
-                data=to_json_bytes(strip_all),
-                file_name=f"{base_filename}_all.json",
-                mime="application/json",
-                use_container_width=True,
-                on_click=log_download_callback,
-                args=(s_city, s_cat)
-            )
+
+        if len(all_results) > len(current_batch):
+            st.markdown("##### 📥 Download All Searches (merged)")
+            a1, a2, _ = st.columns([1, 1, 3])
+            with a1:
+                st.download_button(
+                    f"CSV (all {len(all_results)})",
+                    data=to_csv_bytes(_strip_pid(all_results)),
+                    file_name=f"{base_filename}_all.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    on_click=log_download_callback,
+                    args=(searched_city, searched_category),
+                )
+            with a2:
+                st.download_button(
+                    f"JSON (all {len(all_results)})",
+                    data=to_json_bytes(_strip_pid(all_results)),
+                    file_name=f"{base_filename}_all.json",
+                    mime="application/json",
+                    use_container_width=True,
+                    on_click=log_download_callback,
+                    args=(searched_city, searched_category),
+                )
 
     st.markdown('<div class="footer">MedMap · Built with Streamlit & Google Maps Places API</div>', unsafe_allow_html=True)
 
