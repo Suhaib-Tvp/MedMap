@@ -238,13 +238,13 @@ def get_recent_downloads(limit=5) -> List[Tuple[str, str, str]]:
 # ============================================================================
 # API Search & Processing Functions
 # ============================================================================
-@st.cache_data(show_spinner=False, ttl=86400)
-def fetch_places(_api_key: str, category: str, city: str) -> List[Dict[str, Any]]:
-    """Fetch places using direct text search with pagination (no geocoding needed)."""
-    all_raw = []
+def _fetch_one_page(
+    api_key: str, query: str, page_token: Optional[str] = None
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Fetch a single page of Places results. Returns (places, next_page_token)."""
     headers = {
         "Content-Type": "application/json",
-        "X-Goog-Api-Key": _api_key,
+        "X-Goog-Api-Key": api_key,
         "X-Goog-FieldMask": (
             "places.id,places.displayName,places.formattedAddress,"
             "places.rating,places.userRatingCount,places.websiteUri,"
@@ -252,30 +252,40 @@ def fetch_places(_api_key: str, category: str, city: str) -> List[Dict[str, Any]
             "nextPageToken"
         ),
     }
+    payload: Dict[str, Any] = {"textQuery": query}
+    if page_token:
+        payload["pageToken"] = page_token
+
+    resp = requests.post(PLACES_TEXT_SEARCH_URL, headers=headers, json=payload, timeout=30)
+    log_api_usage(1)
+
+    if resp.status_code == 200:
+        data = resp.json()
+        places = data.get("places", [])
+        next_token = data.get("nextPageToken")
+        return places, next_token
+    else:
+        logger.error(f"Places API error {resp.status_code}: {resp.text}")
+        return [], None
+
+
+def fetch_places_batch(
+    api_key: str, category: str, city: str,
+    page_token: Optional[str] = None, max_pages: int = MAX_PAGES
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Fetch up to max_pages of results. Returns (all_places, last_next_page_token)."""
+    all_raw: List[Dict[str, Any]] = []
     query = f"{category} in {city}"
-    page_token = None
+    token = page_token
 
-    for _ in range(MAX_PAGES):
-        payload: Dict[str, Any] = {"textQuery": query}
-        if page_token:
-            payload["pageToken"] = page_token
-
-        resp = requests.post(PLACES_TEXT_SEARCH_URL, headers=headers, json=payload, timeout=30)
-        log_api_usage(1)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            results = data.get("places", [])
-            all_raw.extend(results)
-            page_token = data.get("nextPageToken")
-            if not page_token:
-                break
-            time.sleep(PAGE_TOKEN_DELAY_SECONDS)
-        else:
-            logger.error(f"Places API error {resp.status_code}: {resp.text}")
+    for _ in range(max_pages):
+        places, token = _fetch_one_page(api_key, query, token)
+        all_raw.extend(places)
+        if not token:
             break
+        time.sleep(PAGE_TOKEN_DELAY_SECONDS)
 
-    return all_raw
+    return all_raw, token
 
 def extract_place_details(place: Dict[str, Any], default_city: str = "") -> Dict[str, str]:
     name_dict = place.get("displayName", {})
@@ -386,7 +396,7 @@ def main() -> None:
         log_search(city, category)
 
         with st.spinner(f"Searching for {category} in {city}..."):
-            raw_results = fetch_places(google_key, category, city)
+            raw_results, next_token = fetch_places_batch(google_key, category, city)
 
         # Deduplication
         seen = set()
@@ -413,6 +423,8 @@ def main() -> None:
             return
 
         st.session_state["results"] = batch
+        st.session_state["seen_ids"] = seen
+        st.session_state["next_page_token"] = next_token
         st.session_state["city"] = city
         st.session_state["category"] = category
 
@@ -493,6 +505,40 @@ def main() -> None:
                 on_click=log_download_callback,
                 args=(s_city, s_cat)
             )
+
+        # ---------- Load More Button ----------
+        next_token = st.session_state.get("next_page_token")
+        if next_token and google_key:
+            st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+            if st.button("➕ Load More Results", use_container_width=True):
+                with st.spinner("Fetching more results..."):
+                    more_raw, new_token = fetch_places_batch(
+                        google_key,
+                        st.session_state["category"],
+                        st.session_state["city"],
+                        page_token=next_token,
+                        max_pages=MAX_PAGES,
+                    )
+
+                seen_ids = st.session_state.get("seen_ids", set())
+                target_city_lower = st.session_state["city"].split(",")[0].strip().lower()
+                new_batch = []
+                for r in more_raw:
+                    pid = r.get("id")
+                    if pid and pid not in seen_ids:
+                        seen_ids.add(pid)
+                        details = extract_place_details(r, default_city=target_city_lower)
+                        new_batch.append(details)
+
+                if new_batch:
+                    st.session_state["results"].extend(new_batch)
+                    st.session_state["seen_ids"] = seen_ids
+                    st.success(f"✅ Loaded {len(new_batch)} new results! Total: {len(st.session_state['results'])}")
+                else:
+                    st.info("No new unique results found.")
+
+                st.session_state["next_page_token"] = new_token
+                st.rerun()
 
     st.markdown('<div class="footer">MedMap · Built with Streamlit & Google Maps Places API</div>', unsafe_allow_html=True)
 
