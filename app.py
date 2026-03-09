@@ -188,9 +188,8 @@ supabase: Client = init_supabase()
 
 def log_api_usage(count=1):
     try:
-        data = []
-        for _ in range(count):
-            data.append({}) 
+        now = datetime.datetime.utcnow().isoformat()
+        data = [{"timestamp": now} for _ in range(count)]
         supabase.table("api_usage").insert(data).execute()
     except Exception as e:
         logger.error(f"Failed to log API usage: {e}")
@@ -423,8 +422,11 @@ def main() -> None:
             return
 
         st.session_state["results"] = batch
+        st.session_state["all_results"] = list(batch)  # cumulative across rounds
+        st.session_state["current_batch"] = list(batch)
         st.session_state["seen_ids"] = seen
         st.session_state["next_page_token"] = next_token
+        st.session_state["search_round"] = 1
         st.session_state["city"] = city
         st.session_state["category"] = category
 
@@ -448,6 +450,7 @@ def main() -> None:
                 pass
         avg_rating = round(avg_rating / rated_count, 1) if rated_count else 0
         
+        search_round = st.session_state.get("search_round", 1)
         st.markdown(
             f"""
             <div class="metric-row">
@@ -463,6 +466,10 @@ def main() -> None:
                     <div class="value">{total_reviews:,}</div>
                     <div class="label">Total Reviews</div>
                 </div>
+                <div class="metric-card">
+                    <div class="value">{search_round}</div>
+                    <div class="label">Search Round</div>
+                </div>
             </div>
             """, unsafe_allow_html=True
         )
@@ -471,8 +478,45 @@ def main() -> None:
         display_cols = ["Name", "City", "Address", "Phone", "Website URL", "Rating", "Reviews"]
         df_display = df[[c for c in display_cols if c in df.columns]]
         st.dataframe(df_display, use_container_width=True, hide_index=True, height=min(len(df_display)*38+50, 600))
+
+        # ---------- Load More Button ----------
+        st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+        if google_key:
+            next_token = st.session_state.get("next_page_token")
+            if next_token:
+                if st.button("➕ Load More Results", use_container_width=True, key="load_more"):
+                    with st.spinner("Fetching more results..."):
+                        more_raw, new_token = fetch_places_batch(
+                            google_key,
+                            st.session_state["category"],
+                            st.session_state["city"],
+                            page_token=next_token,
+                            max_pages=MAX_PAGES,
+                        )
+
+                    seen_ids = st.session_state.get("seen_ids", set())
+                    target_city_lower = st.session_state["city"].split(",")[0].strip().lower()
+                    new_batch = []
+                    for r in more_raw:
+                        pid = r.get("id")
+                        if pid and pid not in seen_ids:
+                            seen_ids.add(pid)
+                            details = extract_place_details(r, default_city=target_city_lower)
+                            new_batch.append(details)
+
+                    if new_batch:
+                        st.session_state["results"].extend(new_batch)
+                        st.session_state["all_results"].extend(new_batch)
+                        st.session_state["current_batch"] = new_batch
+                        st.session_state["seen_ids"] = seen_ids
+                        st.session_state["search_round"] = st.session_state.get("search_round", 1) + 1
+
+                    st.session_state["next_page_token"] = new_token
+                    st.rerun()
+            else:
+                st.info("✅ All available results have been loaded. No more pages from Google.")
         
-        # Downloads
+        # ---------- Downloads Section ----------
         st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
         st.markdown("##### 📥 Download Results")
         
@@ -481,15 +525,21 @@ def main() -> None:
         safe_city = s_city.split(",")[0].strip().replace(" ", "_").lower()
         safe_cat = s_cat.strip().replace(" ", "_").lower()
         base_filename = f"{safe_city}_{safe_cat}"
-        
-        strip_pid = [{k:v for k,v in h.items() if k != "place_id"} for h in results]
 
-        c1, c2, _ = st.columns([1, 1, 3])
+        current_batch = st.session_state.get("current_batch", results)
+        all_results = st.session_state.get("all_results", results)
+        
+        strip_current = [{k:v for k,v in h.items() if k != "place_id"} for h in current_batch]
+        strip_all = [{k:v for k,v in h.items() if k != "place_id"} for h in all_results]
+
+        st.markdown(f"**Current Batch:** {len(strip_current)} records &nbsp;|&nbsp; **All Batches:** {len(strip_all)} records")
+
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.download_button(
-                "CSV Dataset",
-                data=to_csv_bytes(strip_pid),
-                file_name=f"{base_filename}.csv",
+                "📄 Current Batch CSV",
+                data=to_csv_bytes(strip_current),
+                file_name=f"{base_filename}_batch.csv",
                 mime="text/csv",
                 use_container_width=True,
                 on_click=log_download_callback,
@@ -497,48 +547,34 @@ def main() -> None:
             )
         with c2:
             st.download_button(
-                "JSON Dataset",
-                data=to_json_bytes(strip_pid),
-                file_name=f"{base_filename}.json",
+                "📄 Current Batch JSON",
+                data=to_json_bytes(strip_current),
+                file_name=f"{base_filename}_batch.json",
                 mime="application/json",
                 use_container_width=True,
                 on_click=log_download_callback,
                 args=(s_city, s_cat)
             )
-
-        # ---------- Load More Button ----------
-        next_token = st.session_state.get("next_page_token")
-        if next_token and google_key:
-            st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-            if st.button("➕ Load More Results", use_container_width=True):
-                with st.spinner("Fetching more results..."):
-                    more_raw, new_token = fetch_places_batch(
-                        google_key,
-                        st.session_state["category"],
-                        st.session_state["city"],
-                        page_token=next_token,
-                        max_pages=MAX_PAGES,
-                    )
-
-                seen_ids = st.session_state.get("seen_ids", set())
-                target_city_lower = st.session_state["city"].split(",")[0].strip().lower()
-                new_batch = []
-                for r in more_raw:
-                    pid = r.get("id")
-                    if pid and pid not in seen_ids:
-                        seen_ids.add(pid)
-                        details = extract_place_details(r, default_city=target_city_lower)
-                        new_batch.append(details)
-
-                if new_batch:
-                    st.session_state["results"].extend(new_batch)
-                    st.session_state["seen_ids"] = seen_ids
-                    st.success(f"✅ Loaded {len(new_batch)} new results! Total: {len(st.session_state['results'])}")
-                else:
-                    st.info("No new unique results found.")
-
-                st.session_state["next_page_token"] = new_token
-                st.rerun()
+        with c3:
+            st.download_button(
+                "📦 All Batches CSV",
+                data=to_csv_bytes(strip_all),
+                file_name=f"{base_filename}_all.csv",
+                mime="text/csv",
+                use_container_width=True,
+                on_click=log_download_callback,
+                args=(s_city, s_cat)
+            )
+        with c4:
+            st.download_button(
+                "📦 All Batches JSON",
+                data=to_json_bytes(strip_all),
+                file_name=f"{base_filename}_all.json",
+                mime="application/json",
+                use_container_width=True,
+                on_click=log_download_callback,
+                args=(s_city, s_cat)
+            )
 
     st.markdown('<div class="footer">MedMap · Built with Streamlit & Google Maps Places API</div>', unsafe_allow_html=True)
 
