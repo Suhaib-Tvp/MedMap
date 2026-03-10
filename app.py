@@ -837,11 +837,6 @@ def main() -> None:
         recent_searches = get_recent_searches()
         if recent_searches:
             for s_city, s_cat, s_time in recent_searches:
-        # Search History
-        st.markdown("## 🕒 Search History")
-        recent_searches = get_recent_searches()
-        if recent_searches:
-            for s_city, s_cat, s_time in recent_searches:
                 st.caption(f"{s_cat} in {s_city} ({s_time})")
         else:
             st.caption("No recent searches.")
