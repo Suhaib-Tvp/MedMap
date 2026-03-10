@@ -238,10 +238,30 @@ def log_search(city: str, keyword: str):
     except Exception as e:
         logger.error(f"Failed to log search: {e}")
 
+def format_to_ist(timestamp_str: str) -> str:
+    try:
+        if not timestamp_str:
+            return ""
+        # Handle trailing Z
+        if timestamp_str.endswith('Z'):
+            timestamp_str = timestamp_str[:-1] + '+00:00'
+        
+        dt = datetime.datetime.fromisoformat(timestamp_str)
+        # If naïve, treat as UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+            
+        ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        dt_ist = dt.astimezone(ist_tz)
+        return dt_ist.strftime("%b %d %Y, %I:%M %p")
+    except Exception as e:
+        return str(timestamp_str)[:16].replace('T', ' ')
+
+
 def get_recent_searches(limit=10) -> List[Tuple[str, str, str]]:
     try:
         response = supabase.table("search_history").select("city, keyword, timestamp").order("timestamp", desc=True).limit(limit).execute()
-        return [(r['city'], r['keyword'], r['timestamp']) for r in response.data]
+        return [(r['city'], r['keyword'], format_to_ist(r['timestamp'])) for r in response.data]
     except Exception as e:
         logger.error(f"Failed to fetch recent searches: {e}")
         return []
@@ -255,7 +275,7 @@ def log_download(city: str, keyword: str):
 def get_recent_downloads(limit=5) -> List[Tuple[str, str, str]]:
     try:
         response = supabase.table("downloads").select("city, keyword, timestamp").order("timestamp", desc=True).limit(limit).execute()
-        return [(r['city'], r['keyword'], r['timestamp']) for r in response.data]
+        return [(r['city'], r['keyword'], format_to_ist(r['timestamp'])) for r in response.data]
     except Exception as e:
         logger.error(f"Failed to fetch recent downloads: {e}")
         return []
@@ -817,7 +837,12 @@ def main() -> None:
         recent_searches = get_recent_searches()
         if recent_searches:
             for s_city, s_cat, s_time in recent_searches:
-                st.caption(f"{s_cat} in {s_city} ({s_time[:16].replace('T', ' ')})")
+        # Search History
+        st.markdown("## 🕒 Search History")
+        recent_searches = get_recent_searches()
+        if recent_searches:
+            for s_city, s_cat, s_time in recent_searches:
+                st.caption(f"{s_cat} in {s_city} ({s_time})")
         else:
             st.caption("No recent searches.")
 
@@ -828,7 +853,7 @@ def main() -> None:
         recent_dl = get_recent_downloads()
         if recent_dl:
             for d_city, d_cat, d_time in recent_dl:
-                st.caption(f"{d_city}_{d_cat} ({d_time[:16].replace('T', ' ')})")
+                st.caption(f"{d_city}_{d_cat} ({d_time})")
         else:
             st.caption("No recent downloads.")
 
