@@ -228,9 +228,13 @@ def get_monthly_api_usage() -> int:
         logger.error(f"Failed to fetch API usage count: {e}")
         return 0
 
+def _ist_now() -> str:
+    ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    return datetime.datetime.now(ist_tz).isoformat()
+
 def log_search(city: str, keyword: str):
     try:
-        supabase.table("search_history").insert({"city": city, "keyword": keyword}).execute()
+        supabase.table("search_history").insert({"city": city, "keyword": keyword, "timestamp": _ist_now()}).execute()
     except Exception as e:
         logger.error(f"Failed to log search: {e}")
 
@@ -244,7 +248,7 @@ def get_recent_searches(limit=10) -> List[Tuple[str, str, str]]:
 
 def log_download(city: str, keyword: str):
     try:
-        supabase.table("downloads").insert({"city": city, "keyword": keyword}).execute()
+        supabase.table("downloads").insert({"city": city, "keyword": keyword, "timestamp": _ist_now()}).execute()
     except Exception as e:
         logger.error(f"Failed to log download: {e}")
 
