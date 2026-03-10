@@ -598,23 +598,23 @@ def main() -> None:
             if "Website URL" not in df_to_filter.columns:
                 st.sidebar.error("Data must have a 'Website URL' column.")
             else:
-                with st.spinner("Filtering departments... This may take a while as it visits each website."):
-                    progress_bar = st.sidebar.progress(0)
-                    status_text = st.sidebar.empty()
+                st.info("Filtering departments... This may take a while as it visits each website.")
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                total = len(df_to_filter)
+                departments_found = []
+                for i, url in enumerate(df_to_filter['Website URL']):
+                    status_text.text(f"Checking {i+1}/{total}...")
+                    departments_found.append(check_departments(url))
+                    progress_bar.progress((i + 1) / total)
                     
-                    total = len(df_to_filter)
-                    departments_found = []
-                    for i, url in enumerate(df_to_filter['Website URL']):
-                        status_text.text(f"Checking {i+1}/{total}...")
-                        departments_found.append(check_departments(url))
-                        progress_bar.progress((i + 1) / total)
-                        
-                    status_text.empty()
-                    progress_bar.empty()
-                    
-                    df_to_filter['Departments Found'] = departments_found
-                    st.session_state["filtered_df"] = df_to_filter
-                    st.sidebar.success("Filtering complete!")
+                status_text.empty()
+                progress_bar.empty()
+                
+                df_to_filter['Departments Found'] = departments_found
+                st.session_state["filtered_df"] = df_to_filter
+                st.sidebar.success("Filtering complete!")
 
     # ------------------------------------------------------------------
     # Display results
@@ -768,7 +768,10 @@ def main() -> None:
     if filtered_df is not None:
         st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
         st.markdown("### 🏥 Filtered Department Results")
-        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+        
+        display_cols_filtered = ["Name", "City", "Address", "Phone", "Website URL", "Rating", "Reviews", "Departments Found"]
+        df_filtered_display = filtered_df[[c for c in display_cols_filtered if c in filtered_df.columns]]
+        st.dataframe(df_filtered_display, use_container_width=True, hide_index=True)
         
         st.markdown("##### 📥 Download Filtered Results")
         c1, c2, _ = st.columns([1, 1, 3])
@@ -785,20 +788,24 @@ def main() -> None:
         with c1:
             st.download_button(
                 "CSV (Filtered)",
-                data=filtered_df.to_csv(index=False).encode('utf-8'),
+                data=filtered_df.drop(columns=['place_id'], errors='ignore').to_csv(index=False).encode('utf-8'),
                 file_name=f"{base_filename}.csv",
                 mime="text/csv",
                 use_container_width=True,
-                key="dl_filtered_csv"
+                key="dl_filtered_csv",
+                on_click=log_download_callback,
+                args=(searched_city, searched_category)
             )
         with c2:
             st.download_button(
                 "JSON (Filtered)",
-                data=filtered_df.to_json(orient="records", indent=2).encode('utf-8'),
+                data=filtered_df.drop(columns=['place_id'], errors='ignore').to_json(orient="records", indent=2).encode('utf-8'),
                 file_name=f"{base_filename}.json",
                 mime="application/json",
                 use_container_width=True,
-                key="dl_filtered_json"
+                key="dl_filtered_json",
+                on_click=log_download_callback,
+                args=(searched_city, searched_category)
             )
 
     st.markdown('<div class="footer">MedMap · Built with Streamlit & Google Maps Places API</div>', unsafe_allow_html=True)
