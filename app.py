@@ -68,6 +68,11 @@ st.markdown(
         font-family: 'Inter', sans-serif;
     }
 
+    /* Fix Material Icons displaying as text (e.g. keyboard_double_arrow_right) */
+    .material-symbols-rounded, .stIcon {
+        font-family: 'Material Symbols Rounded' !important;
+    }
+
     /* ---------- Main background ---------- */
     .stApp {
         background: linear-gradient(135deg, #0f0c29 0%, #1a1a2e 40%, #16213e 100%);
@@ -598,7 +603,8 @@ def main() -> None:
             if "Website URL" not in df_to_filter.columns:
                 st.sidebar.error("Data must have a 'Website URL' column.")
             else:
-                st.info("Filtering departments... This may take a while as it visits each website.")
+                info_msg = st.empty()
+                info_msg.info("Filtering departments... This may take a while as it visits each website.")
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
@@ -611,6 +617,7 @@ def main() -> None:
                     
                 status_text.empty()
                 progress_bar.empty()
+                info_msg.empty()
                 
                 df_to_filter['Departments Found'] = departments_found
                 st.session_state["filtered_df"] = df_to_filter
