@@ -14,9 +14,12 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+import urllib3
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ---------------------------------------------------------------------------
 # Logging & Constants
@@ -258,6 +261,36 @@ def get_recent_downloads(limit=5) -> List[Tuple[str, str, str]]:
 # ============================================================================
 # Google Maps Places API — Text Search
 # ============================================================================
+KEYWORDS = [
+    'pmr', 'physical medical', 'physical medicine', 'physiotherapy', 
+    'rehabilitation', 'rehab', 'neuro', 'neuro science', 
+    'neuro surgery', 'neurology', 'orthopaedic', 'orthopedic', 'orthopaedics'
+]
+
+def check_departments(url: Any) -> str:
+    if pd.isna(url) or not isinstance(url, str) or not url.strip():
+        return "No Website"
+    
+    if not url.startswith('http'):
+        url = 'http://' + url
+        
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    try:
+        res = requests.get(url, headers=headers, timeout=10, verify=False)
+        
+        if res.status_code == 200:
+            text = res.text.lower()
+            found_terms = [word for word in KEYWORDS if word in text]
+            if found_terms:
+                return ", ".join(list(dict.fromkeys(found_terms)))
+            else:
+                return "Not found on homepage"
+        else:
+            return f"Error ({res.status_code})"
+    except Exception:
+        return "Failed to access"
+
 def _search_places_page(
     api_key: str,
     query: str,
@@ -406,6 +439,21 @@ def main() -> None:
         search_clicked = st.button("🔍  Search", use_container_width=True)
 
         st.markdown("---")
+        
+        # Filter Section
+        st.markdown("## 🏥 Filter Departments")
+        filter_source = st.selectbox(
+            "Select data to filter:",
+            ["Current Batch", "All Searches", "Upload CSV"]
+        )
+        
+        uploaded_csv = None
+        if filter_source == "Upload CSV":
+            uploaded_csv = st.file_uploader("Upload CSV file", type=["csv"])
+            
+        filter_clicked = st.button("⚙️ Apply Department Filter", use_container_width=True)
+
+        st.markdown("---")
 
         # API Usage Dashboard
         st.markdown("## 📊 Google API Usage")
@@ -521,6 +569,52 @@ def main() -> None:
         log_search(city, category)
         _run_search_round(google_key, category, city)
         st.session_state["search_round"] = 1
+
+    # ------------------------------------------------------------------
+    # Handle Filter action
+    # ------------------------------------------------------------------
+    if filter_clicked:
+        df_to_filter = None
+        if filter_source == "Current Batch":
+            if st.session_state.get("current_batch"):
+                df_to_filter = pd.DataFrame(st.session_state["current_batch"])
+            else:
+                st.sidebar.warning("Current batch is empty.")
+        elif filter_source == "All Searches":
+            if st.session_state.get("all_results"):
+                df_to_filter = pd.DataFrame(st.session_state["all_results"])
+            else:
+                st.sidebar.warning("No search results to filter.")
+        elif filter_source == "Upload CSV":
+            if uploaded_csv is not None:
+                try:
+                    df_to_filter = pd.read_csv(uploaded_csv)
+                except Exception as e:
+                    st.sidebar.error(f"Error reading CSV: {e}")
+            else:
+                st.sidebar.warning("Please upload a CSV file.")
+                
+        if df_to_filter is not None and not df_to_filter.empty:
+            if "Website URL" not in df_to_filter.columns:
+                st.sidebar.error("Data must have a 'Website URL' column.")
+            else:
+                with st.spinner("Filtering departments... This may take a while as it visits each website."):
+                    progress_bar = st.sidebar.progress(0)
+                    status_text = st.sidebar.empty()
+                    
+                    total = len(df_to_filter)
+                    departments_found = []
+                    for i, url in enumerate(df_to_filter['Website URL']):
+                        status_text.text(f"Checking {i+1}/{total}...")
+                        departments_found.append(check_departments(url))
+                        progress_bar.progress((i + 1) / total)
+                        
+                    status_text.empty()
+                    progress_bar.empty()
+                    
+                    df_to_filter['Departments Found'] = departments_found
+                    st.session_state["filtered_df"] = df_to_filter
+                    st.sidebar.success("Filtering complete!")
 
     # ------------------------------------------------------------------
     # Display results
@@ -669,6 +763,43 @@ def main() -> None:
                     on_click=log_download_callback,
                     args=(searched_city, searched_category),
                 )
+
+    filtered_df = st.session_state.get("filtered_df")
+    if filtered_df is not None:
+        st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+        st.markdown("### 🏥 Filtered Department Results")
+        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+        
+        st.markdown("##### 📥 Download Filtered Results")
+        c1, c2, _ = st.columns([1, 1, 3])
+        
+        base_filename = "filtered_departments"
+        # determine base filename gracefully
+        if filter_source == "Upload CSV" and uploaded_csv is not None:
+            base_filename = f"filtered_{uploaded_csv.name.split('.')[0]}"
+        elif searched_city and searched_category:
+            safe_city = searched_city.split(",")[0].strip().lower().replace(" ", "_")
+            safe_cat = searched_category.strip().lower().replace(" ", "_")
+            base_filename = f"filtered_{safe_city}_{safe_cat}"
+            
+        with c1:
+            st.download_button(
+                "CSV (Filtered)",
+                data=filtered_df.to_csv(index=False).encode('utf-8'),
+                file_name=f"{base_filename}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="dl_filtered_csv"
+            )
+        with c2:
+            st.download_button(
+                "JSON (Filtered)",
+                data=filtered_df.to_json(orient="records", indent=2).encode('utf-8'),
+                file_name=f"{base_filename}.json",
+                mime="application/json",
+                use_container_width=True,
+                key="dl_filtered_json"
+            )
 
     st.markdown('<div class="footer">MedMap · Built with Streamlit & Google Maps Places API</div>', unsafe_allow_html=True)
 
