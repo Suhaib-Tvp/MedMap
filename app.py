@@ -457,8 +457,6 @@ def main() -> None:
             
         filter_clicked = st.button("⚙️ Apply Department Filter", use_container_width=True)
 
-        filter_clicked = st.button("⚙️ Apply Department Filter", use_container_width=True)
-
         st.markdown("---")
 
         # Create placeholder container for the dashboard logic so it respects linear execution
