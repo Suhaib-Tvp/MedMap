@@ -5,3 +5,7 @@ pandas>=2.0.0
 
 supabase>=2.3.4
 httpx>=0.24.0
+urllib3>=2.0.0
+streamlit>=1.30.0
+
+urllib3>=2.0.0
