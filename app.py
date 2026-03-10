@@ -815,6 +815,52 @@ def main() -> None:
             )
 
     st.markdown('<div class="footer">MedMap · Built with Streamlit & Google Maps Places API</div>', unsafe_allow_html=True)
+    
+    # ------------------------------------------------------------------
+    # Finally, render the sidebar dynamic content metrics using the container at the end
+    # so they evaluate accurately after log insertions are committed
+    # ------------------------------------------------------------------
+    with metrics_container:
+        # API Usage Dashboard
+        st.markdown("## 📊 Google API Usage")
+        monthly_usage = get_monthly_api_usage()
+        remaining = max(0, API_LIMIT_MONTHLY - monthly_usage)
+        usage_pct = (monthly_usage / API_LIMIT_MONTHLY) * 100
+
+        st.metric("Monthly Requests", f"{monthly_usage} / {API_LIMIT_MONTHLY}")
+        st.metric("Remaining Requests", remaining)
+        st.progress(min(usage_pct / 100, 1.0))
+
+        usage_error = False
+        if usage_pct >= 100:
+            st.error("🚨 Monthly API limit reached. Stop API calls.")
+            usage_error = True
+        elif usage_pct >= 90:
+            st.error("🚨 Danger: API usage > 90%!")
+        elif usage_pct >= 70:
+            st.warning("⚠ API usage getting high this month.")
+
+        st.markdown("---")
+
+        # Search History
+        st.markdown("## 🕒 Search History")
+        recent_searches = get_recent_searches()
+        if recent_searches:
+            for s_city, s_cat, s_time in recent_searches:
+                st.caption(f"{s_cat} in {s_city} ({s_time})")
+        else:
+            st.caption("No recent searches.")
+
+        st.markdown("---")
+
+        # Downloaded Datasets
+        st.markdown("## 📥 Downloaded Datasets")
+        recent_dl = get_recent_downloads()
+        if recent_dl:
+            for d_city, d_cat, d_time in recent_dl:
+                st.caption(f"{d_city}_{d_cat} ({d_time})")
+        else:
+            st.caption("No recent downloads.")
 
 if __name__ == "__main__":
     main()
