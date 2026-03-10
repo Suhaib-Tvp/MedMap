@@ -64,20 +64,8 @@ st.markdown(
     /* ---------- Google Font ---------- */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
-    html, body, [class*="st-"] {
+    html, body, .stApp {
         font-family: 'Inter', sans-serif;
-    }
-
-    /* Fix Material Icons displaying as text (e.g. keyboard_double_arrow_right) */
-    .material-symbols-rounded, 
-    .stIcon, 
-    [data-testid="stSidebarCollapseButton"],
-    [data-testid="stSidebarCollapseButton"] *,
-    [data-testid="collapsedControl"],
-    [data-testid="collapsedControl"] *,
-    .st-emotion-cache-1rf8s9b, /* specific sidebar arrow class */
-    [class*="Icon"] {
-        font-family: 'Material Symbols Rounded', 'Material Icons', sans-serif !important;
     }
 
     /* ---------- Main background ---------- */
