@@ -432,6 +432,10 @@ def main() -> None:
     if "raw_cache" not in st.session_state:
         st.session_state["raw_cache"] = []
 
+    # Initialize usage_error globally to prevent UnboundLocalError
+    # We will compute the real value before search if needed, but default to False
+    usage_error = False
+
     st.markdown('<h1 class="hero-title">📍 MedMap</h1>', unsafe_allow_html=True)
     st.markdown('<p class="hero-sub">Discover places in any city — powered by Google Maps</p>', unsafe_allow_html=True)
 
@@ -515,6 +519,10 @@ def main() -> None:
     # "Search" button — fresh search, resets state
     # ------------------------------------------------------------------
     if search_clicked:
+        monthly_usage = get_monthly_api_usage()
+        if monthly_usage >= API_LIMIT_MONTHLY:
+            usage_error = True
+
         if usage_error:
             st.error("Cannot perform search: API limit reached. Please check back next month.")
             return
