@@ -69,8 +69,13 @@ st.markdown(
     }
 
     /* Fix Material Icons displaying as text (e.g. keyboard_double_arrow_right) */
-    .material-symbols-rounded, .stIcon {
-        font-family: 'Material Symbols Rounded' !important;
+    .material-symbols-rounded, 
+    .stIcon, 
+    [data-testid="stSidebarCollapseButton"] span,
+    [data-testid="stSidebarCollapseButton"] i,
+    .st-emotion-cache-1rf8s9b, /* specific sidebar arrow class */
+    [class*="Icon"] {
+        font-family: 'Material Symbols Rounded', 'Material Icons', sans-serif !important;
     }
 
     /* ---------- Main background ---------- */
