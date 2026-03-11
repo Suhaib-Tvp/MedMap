@@ -287,8 +287,7 @@ def get_recent_downloads(limit=5) -> List[Tuple[str, str, str]]:
 # ============================================================================
 KEYWORDS = [
     'pmr', 'physical medical', 'physical medicine', 'physiotherapy', 
-    'rehabilitation', 'rehab', 'neuro', 'neuro science', 
-    'neuro surgery', 'neurology', 'orthopaedic', 'orthopedic', 'orthopaedics'
+    'rehabilitation', 'rehab'
 ]
 
 def check_departments(url: Any) -> str:
