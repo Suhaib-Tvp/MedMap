@@ -287,7 +287,8 @@ def get_recent_downloads(limit=5) -> List[Tuple[str, str, str]]:
 # ============================================================================
 KEYWORDS = [
     'pmr', 'physical medical', 'physical medicine', 'physiotherapy', 
-    'rehabilitation', 'rehab'
+    'rehabilitation', 'rehab', 'neuro', 'neuro science', 
+    'neuro surgery', 'neurology', 'orthopaedic', 'orthopedic', 'orthopaedics'
 ]
 
 def check_departments(url: Any) -> str:
@@ -850,6 +851,26 @@ def main() -> None:
                 st.caption(f"{d_city}_{d_cat} ({d_time})")
         else:
             st.caption("No recent downloads.")
+
+        # Hidden admin section for resetting API usage
+        st.markdown("---")
+        with st.expander("⚠️ Admin Tools", expanded=False):
+            st.caption("🔒 These actions are irreversible.")
+            confirm_reset = st.checkbox(
+                "I understand this will permanently delete all API usage records",
+                key="confirm_reset_usage",
+            )
+            if confirm_reset:
+                if st.button("🗑️ Reset API Usage Cycle", key="reset_usage_btn"):
+                    try:
+                        # Delete all rows from the api_usage table
+                        supabase.table("api_usage").delete().neq("id", -1).execute()
+                        st.success("✅ API usage records cleared! Refreshing…")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        logger.error(f"Failed to reset API usage: {e}")
+                        st.error(f"Failed to reset: {e}")
 
 if __name__ == "__main__":
     main()
